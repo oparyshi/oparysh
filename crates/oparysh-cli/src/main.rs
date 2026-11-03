@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use oparysh_db::rebuild_db_from_backup;
 use oparysh_verifier::verify_tarball;
 use std::path::PathBuf;
@@ -66,7 +66,9 @@ fn main() {
             }
         }
         None => {
-            println!("oparysh placeholder");
+            let mut cmd = Cli::command();
+            cmd.print_help().unwrap();
+            std::process::exit(0);
         }
     }
 }
