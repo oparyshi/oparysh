@@ -117,10 +117,18 @@ pub fn verify_src_sha256(path: &Path, expected: &str) -> Result<(), VerifierErro
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn write_temp_file(content: &[u8]) -> std::path::PathBuf {
         let dir = std::env::temp_dir();
-        let file = dir.join(format!("oparysh_verify_test_{}", std::process::id()));
+        let n = TEST_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let file = dir.join(format!(
+            "oparysh_verify_test_{}_{}",
+            std::process::id(),
+            n
+        ));
         let mut f = File::create(&file).unwrap();
         f.write_all(content).unwrap();
         file

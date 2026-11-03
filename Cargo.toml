@@ -27,13 +27,17 @@ toml = "0.9"
 sha2 = "0.10"
 hex = "0.4"
 # базы данных
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 # сеть (синхронный HTTP-клиент)
 ureq = { version = "3", features = ["gzip"] }
 # ошибки
 anyhow = "1"
 thiserror = "2"
 
+# flock для advisory-lock БД (этап 3.4)
+libc = "0.2"
+
 # oparysh crates (внутренние)
 oparysh-core = { path = "crates/oparysh-core" }
 oparysh-verifier = { path = "crates/oparysh-verifier" }
+oparysh-db = { path = "crates/oparysh-db" }
