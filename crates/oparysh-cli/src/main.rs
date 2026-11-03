@@ -1,5 +1,6 @@
 use clap::Parser;
-use oparysh_verifier::{verify_tarball, VerifierError};
+use oparysh_db::rebuild_db_from_backup;
+use oparysh_verifier::verify_tarball;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -18,6 +19,12 @@ enum Command {
         /// Ожидаемый SHA-256 (hex). Если не указан — вычисляется и печатается.
         #[arg(short, long)]
         expected: Option<String>,
+    },
+    /// Восстановить базу данных из резервной копии db.sqlite.bak (stage 3.6)
+    RebuildDb {
+        /// Директория базы (по умолчанию /var/lib/oparysh)
+        #[arg(long, default_value = "/var/lib/oparysh")]
+        db_dir: PathBuf,
     },
 }
 
@@ -44,6 +51,17 @@ fn main() {
                         eprintln!("ERROR: {e}");
                         std::process::exit(1);
                     }
+                }
+            }
+        }
+        Some(Command::RebuildDb { db_dir }) => {
+            match rebuild_db_from_backup(&db_dir) {
+                Ok(bak) => {
+                    println!("База восстановлена из {}", bak.display());
+                }
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(8);
                 }
             }
         }

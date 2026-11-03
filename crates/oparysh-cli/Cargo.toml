@@ -12,3 +12,4 @@ path = "src/main.rs"
 clap = { workspace = true }
 anyhow = { workspace = true }
 oparysh-verifier = { workspace = true }
+oparysh-db = { workspace = true }
