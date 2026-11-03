@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "oparysh"
+path = "src/main.rs"
+
 [dependencies]
 clap = { workspace = true }
 anyhow = { workspace = true }
