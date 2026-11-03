@@ -15,7 +15,7 @@
 - [x] 0.2. Выбрать и добавить зависимости: `clap`, `serde`, `toml`, `sha2`, `hex`, `rusqlite`, `reqwest` (или `ureq`), `anyhow`/`thiserror`
 - [x] 0.3. Структура каталогов: `tests/integration`, `tests/fixtures`, `contrib/`
 - [x] 0.4. `oparysh --version` собирается и печатает версию
-- [ ] 0.5. CI-скелет: `cargo build && cargo test` на каждый коммит
+- [x] 0.5. CI-скелет: `cargo build && cargo test` на каждый коммит
 
 ## Этап 1. Модель данных и разбор рецепта ☐
 **нужно:** этап 0
