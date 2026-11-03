@@ -33,3 +33,7 @@ ureq = { version = "3", features = ["gzip"] }
 # ошибки
 anyhow = "1"
 thiserror = "2"
+
+# oparysh crates (внутренние)
+oparysh-core = { path = "crates/oparysh-core" }
+oparysh-verifier = { path = "crates/oparysh-verifier" }
