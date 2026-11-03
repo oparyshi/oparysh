@@ -1,1 +1,3 @@
-pub fn main_placeholder() {}
+//! oparysh-core: общие типы и утилиты.
+
+pub mod recipe;
