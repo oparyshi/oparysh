@@ -387,6 +387,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "oparysh-db",
  "oparysh-verifier",
 ]
 
@@ -403,6 +404,7 @@ dependencies = [
 name = "oparysh-db"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rusqlite",
  "thiserror",
 ]

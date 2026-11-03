@@ -38,16 +38,16 @@
 - [x] 2.5. Команда `oparysh verify <tarball>` (входные артефакты) — без `--rehash` по умолчанию
 - [x] 2.6. Тесты: нужный/неверный хэш, отсутствующий хэш
 
-## Этап 3. Локальная база (db) ☐
+## Этап 3. Локальная база (db) ☑
 **нужно:** этап 1
 
-- [ ] 3.1. Схема БД по разделу 3: `packages`, `files`, `deps`, `build_info` + индекс `idx_files_pkg`
-- [ ] 3.2. Механизм миграций (нумерованные SQL-миграции, таблица `_migrations`)
-- [ ] 3.3. DAO: insert/get/list/delete package, insert files скопом, insert deps
-- [ ] 3.4. Advisory-lock: flock на `/var/lib/oparysh/lock`, ошибка **8** при блокировке
-- [ ] 3.5. Запись `pkg_hash` (sha256 рецепта + окружения сборки) и `build_info`
-- [ ] 3.6. Резервная копия `.bak` + команда `oparysh rebuild-db`
-- [ ] 3.7. Интеграционный тест: временный `db_dir`, install-запись, чтение, удаление каскадом
+- [x] 3.1. Схема БД по разделу 3: `packages`, `files`, `deps`, `build_info` + индекс `idx_files_pkg`
+- [x] 3.2. Механизм миграций (нумерованные SQL-миграции, таблица `_migrations`)
+- [x] 3.3. DAO: insert/get/list/delete package, insert files скопом, insert deps
+- [x] 3.4. Advisory-lock: flock на `/var/lib/oparysh/lock`, ошибка **8** при блокировке
+- [x] 3.5. Запись `pkg_hash` (sha256 рецепта + окружения сборки) и `build_info`
+- [x] 3.6. Резервная копия `.bak` + команда `oparysh rebuild-db`
+- [x] 3.7. Интеграционный тест: временный `db_dir`, install-запись, чтение, удаление каскадом
 
 ## Этап 4. Repo (индексы) ☐
 **нужно:** этап 1, 2
