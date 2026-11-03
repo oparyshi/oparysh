@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oparysh-cli",
+    "crates/oparysh-core",
+    "crates/oparysh-resolver",
+    "crates/oparysh-fetcher",
+    "crates/oparysh-verifier",
+    "crates/oparysh-builder",
+    "crates/oparysh-installer",
+    "crates/oparysh-db",
+    "crates/oparysh-repo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
