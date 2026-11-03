@@ -1,0 +1,31 @@
+[pkg]
+name     = "hello"
+version  = "1.0"
+build    = 1
+arch     = ["x86_64", "aarch64"]
+desc     = "Примерный пакет hello world для тестов oparysh"
+license  = "MIT"
+homepage = "https://example.org/hello"
+
+[source]
+url      = "file:///fixtures/hello-1.0/hello-1.0.tar.gz"
+sha256   = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[deps]
+build = ["make>=4.0"]
+run   = []
+
+[build]
+system   = "make-only"
+cc       = ""
+cflags   = ""
+ldflags  = ""
+makeopts = ""
+parallel = 0
+env      = {}
+
+[build.install]
+prefix = "/usr/local"
+
+[files]
+unknown_warn = true
