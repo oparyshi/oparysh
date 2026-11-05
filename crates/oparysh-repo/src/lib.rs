@@ -42,6 +42,13 @@ mod search;
 
 pub use search::{search_repos, SearchHit, SearchOutcome, SearchPattern};
 
+mod query;
+
+pub use query::{
+    info_repos, list_available, outdated_repos, AvailableEntry, AvailableOutcome, InfoOutcome,
+    OutdatedEntry, OutdatedOutcome,
+};
+
 pub const INDEX_FILE: &str = "index.toml";
 pub const RECIPES_DIR: &str = "recipes";
 pub const DIST_DIR: &str = "dist";

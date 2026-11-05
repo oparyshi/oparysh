@@ -58,7 +58,7 @@
 - [x] 4.4. Команда `oparysh sync [repo…]` (+ проверка `recipe_sha` после скачивания)
 - [x] 4.5. Команды `repo add / repo list / repo del` (правка конфига)
 - [x] 4.6. Команда `oparysh search` (glob и `/regex/`) по имени/описанию/тегам
-- [ ] 4.7. Команды `oparysh info`, `oparysh list [--installed|--available|--outdated|--orphaned]`
+- [x] 4.7. Команды `oparysh info`, `oparysh list [--installed|--available|--outdated|--orphaned]`
 - [ ] 4.8. `contrib/repo-index-gen`: генератор `index.toml` по каталогу рецептов (основа `repo gen-index`)
 - [ ] 4.9. Тестовый фикстурный мини-репозиторий (2–3 пакета, локальный каталог)
 

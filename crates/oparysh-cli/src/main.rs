@@ -1,9 +1,10 @@
 use clap::{CommandFactory, Parser};
 use oparysh_core::config::OparyshConfig;
 use oparysh_core::config_edit;
-use oparysh_db::rebuild_db_from_backup;
+use oparysh_db::{rebuild_db_from_backup, Database, Package};
 use oparysh_repo::RepoError;
 use oparysh_verifier::verify_tarball;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Код возврата для ошибки oparysh-repo по DOCS §11.
@@ -59,6 +60,61 @@ fn cache_dir(config: &OparyshConfig) -> PathBuf {
     PathBuf::from(&config.general.cache_dir)
 }
 
+/// Каталог базы: `OPARYSH_DB_DIR` перекрывает конфиг (DOCS §12).
+fn db_dir(config: &OparyshConfig) -> PathBuf {
+    if let Some(dir) = std::env::var_os("OPARYSH_DB_DIR") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(&config.general.db_dir)
+}
+
+/// Открыть локальную базу; ошибка — код возврата **8** (DOCS §11).
+fn open_db(config: &OparyshConfig) -> Database {
+    match Database::open(&db_dir(config)) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(8);
+        }
+    }
+}
+
+/// Разобрать `pkg[@ver]` на имя и опциональную версию.
+fn split_pkg_spec(spec: &str) -> (String, Option<String>) {
+    match spec.rsplit_once('@') {
+        Some((name, version)) if !name.is_empty() && !version.is_empty() => {
+            (name.to_string(), Some(version.to_string()))
+        }
+        _ => (spec.to_string(), None),
+    }
+}
+
+/// Обратные зависимости: установленные пакеты, на которые никто не ссылается.
+///
+/// Это кандидаты в «сироты» (`list --orphaned`). Установщик (этап 8) ещё не
+/// пишет причину установки, поэтому пакеты, поставленные явно, пока тоже
+/// попадают сюда; учёт «установлен как зависимость» — этап 10.4.
+fn orphaned_packages(db: &Database) -> oparysh_db::DbResult<Vec<Package>> {
+    let pkgs = db.list_packages()?;
+    let mut needed: HashSet<String> = HashSet::new();
+    for p in &pkgs {
+        for dep in db.get_deps(&p.name)? {
+            needed.insert(dep.dep_name);
+        }
+    }
+    Ok(pkgs
+        .into_iter()
+        .filter(|p| !needed.contains(&p.name))
+        .collect())
+}
+
+/// Предупреждения о пропущенных репозиториях — в stderr.
+fn print_skipped(skipped: &[(String, String)]) {
+    for (name, reason) in skipped {
+        eprintln!("WARN: репозиторий «{name}» пропущен: {reason}");
+    }
+}
+
 /// `oparysh sync [repo…]`: скачать/обновить index.toml репозиториев из конфига.
 fn run_sync(repos: &[String]) -> oparysh_repo::RepoResult<Vec<oparysh_repo::SyncOutcome>> {
     let config = load_config(None);
@@ -90,6 +146,186 @@ fn run_search(pattern: &str) -> oparysh_repo::RepoResult<oparysh_repo::SearchOut
     let config = load_config(None);
     let pattern = oparysh_repo::SearchPattern::parse(pattern)?;
     oparysh_repo::search_repos(&config.repositories.entries, &cache_dir(&config), &pattern)
+}
+
+/// `oparysh info <pkg>[@ver]`: метаданные пакета из репозиториев.
+fn run_info(spec: &str) -> oparysh_repo::RepoResult<oparysh_repo::InfoOutcome> {
+    let config = load_config(None);
+    let (name, version) = split_pkg_spec(spec);
+    oparysh_repo::info_repos(
+        &config.repositories.entries,
+        &cache_dir(&config),
+        &name,
+        version.as_deref(),
+    )
+}
+
+/// Напечатать метаданные пакета для `oparysh info`.
+fn print_info(info: &oparysh_repo::InfoOutcome) {
+    let p = &info.pkg;
+    let field = |label: &str, value: &str| {
+        if !value.is_empty() {
+            println!("{label:<13} {value}");
+        }
+    };
+    println!("{:<13} {} {} (build {})", "ПАКЕТ", p.name, p.version, p.build);
+    field("РЕПОЗИТОРИЙ", &info.repo);
+    field("АРХИТЕКТУРА", &p.arch.join(", "));
+    field("ОПИСАНИЕ", &p.desc);
+    field("ТЕГИ", &p.tags.join(", "));
+    field("ЗАВИСИМОСТИ", &p.deps.join(", "));
+    field("PROVIDES", &p.provides.join(", "));
+    field("CONFLICTS", &p.conflicts.join(", "));
+    field("RECIPE_SHA", &p.recipe_sha);
+    field("SRC_SHA256", &p.src_sha256);
+}
+
+/// `oparysh list`: установленные и/или доступные пакеты (этап 4.7).
+fn run_list(installed: bool, available: bool, outdated: bool, orphaned: bool) {
+    let config = load_config(None);
+
+    if available {
+        list_available(&config);
+    } else if outdated {
+        list_outdated(&config);
+    } else if orphaned {
+        list_orphaned(&config);
+    } else {
+        // Флаг `installed` и отсутствие флагов — установленные пакеты.
+        let _ = installed;
+        list_installed(&config);
+    }
+}
+
+/// Печать одной строки пакета в формате «ИМЯ ВЕРСИЯ …».
+fn print_package_row(p: &Package) {
+    println!(
+        "{:<24} {:<12} {:>5} {:<10} {:>12}  {}",
+        p.name,
+        p.version,
+        p.build_rev,
+        p.arch,
+        p.size_bytes,
+        format_date_utc(p.install_ts.max(0) as u64),
+    );
+}
+
+/// `oparysh list --installed`: пакеты из локальной базы.
+fn list_installed(config: &OparyshConfig) {
+    let db = open_db(config);
+    let pkgs = match db.list_packages() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(8);
+        }
+    };
+    if pkgs.is_empty() {
+        println!("нет установленных пакетов");
+        return;
+    }
+    println!(
+        "{name:<24} {version:<12} {build:>5} {arch:<10} {size:>12}  {date}",
+        name = "ИМЯ", version = "ВЕРСИЯ", build = "BUILD", arch = "АРХ",
+        size = "РАЗМЕР", date = "УСТАНОВЛЕН"
+    );
+    for p in &pkgs {
+        print_package_row(p);
+    }
+}
+
+/// `oparysh list --available`: записи `[[pkg]]` всех репозиториев.
+fn list_available(config: &OparyshConfig) {
+    match oparysh_repo::list_available(&config.repositories.entries, &cache_dir(config)) {
+        Ok(out) => {
+            print_skipped(&out.skipped);
+            if out.entries.is_empty() {
+                println!("нет доступных пакетов");
+                return;
+            }
+            println!(
+                "{name:<24} {version:<12} {repo:<16} ОПИСАНИЕ",
+                name = "ИМЯ", version = "ВЕРСИЯ", repo = "РЕПО"
+            );
+            for e in &out.entries {
+                println!(
+                    "{:<24} {:<12} {:<16} {}",
+                    e.pkg.name, e.pkg.version, e.repo, e.pkg.desc
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(repo_exit_code(&e));
+        }
+    }
+}
+
+/// `oparysh list --outdated`: установленные пакеты с более свежей версией в репо.
+fn list_outdated(config: &OparyshConfig) {
+    let db = open_db(config);
+    let pkgs = match db.list_packages() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(8);
+        }
+    };
+    let installed: Vec<(String, String)> =
+        pkgs.iter().map(|p| (p.name.clone(), p.version.clone())).collect();
+
+    match oparysh_repo::outdated_repos(
+        &config.repositories.entries,
+        &cache_dir(config),
+        &installed,
+    ) {
+        Ok(out) => {
+            print_skipped(&out.skipped);
+            if out.entries.is_empty() {
+                println!("все установленные пакеты актуальны");
+                return;
+            }
+            println!(
+                "{name:<24} {installed:<12} {available:<12} {repo:<16}",
+                name = "ИМЯ", installed = "УСТАНОВЛЕНА", available = "ДОСТУПНА", repo = "РЕПО"
+            );
+            for e in &out.entries {
+                println!(
+                    "{:<24} {:<12} {:<12} {:<16}",
+                    e.name, e.installed, e.available, e.repo
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(repo_exit_code(&e));
+        }
+    }
+}
+
+/// `oparysh list --orphaned`: установленные пакеты, на которые никто не ссылается.
+fn list_orphaned(config: &OparyshConfig) {
+    let db = open_db(config);
+    let pkgs = match orphaned_packages(&db) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(8);
+        }
+    };
+    if pkgs.is_empty() {
+        println!("сирот не найдено");
+        return;
+    }
+    println!(
+        "{name:<24} {version:<12}",
+        name = "ИМЯ", version = "ВЕРСИЯ"
+    );
+    for p in &pkgs {
+        println!("{:<24} {:<12}", p.name, p.version);
+    }
+    println!();
+    println!("(ни один установленный пакет от них не зависит)");
 }
 
 /// `oparysh repo add <name> <url|path>`: добавить репозиторий в конфиг.
@@ -202,6 +438,28 @@ enum Command {
         /// Шаблон: glob (`gcc*`, `*-git`) или регулярное выражение в слэшах (`/^lib.*/`)
         pattern: String,
     },
+    /// Показать метаданные пакета: зависимости, provides, версию, репозиторий (stage 4.7)
+    Info {
+        /// Пакет в виде `pkg` или `pkg@ver`
+        pkg: String,
+    },
+    /// Список установленных/доступных пакетов (stage 4.7)
+    #[command(group = clap::ArgGroup::new("list_scope").multiple(false)
+        .args(["installed", "available", "outdated", "orphaned"]))]
+    List {
+        /// Только установленные пакеты (по умолчанию)
+        #[arg(long)]
+        installed: bool,
+        /// Все пакеты из репозиториев
+        #[arg(long)]
+        available: bool,
+        /// Установленные пакеты с более свежей версией в репозитории
+        #[arg(long)]
+        outdated: bool,
+        /// Установленные пакеты, от которых никто не зависит
+        #[arg(long)]
+        orphaned: bool,
+    },
     /// Управление репозиториями в конфиге (stage 4.5)
     Repo {
         #[command(subcommand)]
@@ -308,6 +566,22 @@ fn main() {
                 std::process::exit(repo_exit_code(&e));
             }
         },
+        Some(Command::Info { pkg }) => match run_info(&pkg) {
+            Ok(info) => {
+                print_skipped(&info.skipped);
+                print_info(&info);
+            }
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(repo_exit_code(&e));
+            }
+        },
+        Some(Command::List {
+            installed,
+            available,
+            outdated,
+            orphaned,
+        }) => run_list(installed, available, outdated, orphaned),
         Some(Command::Repo { action }) => match action {
             RepoCommand::Add { name, target } => match run_repo_add(&name, &target) {
                 Ok(msg) => println!("{msg}"),
