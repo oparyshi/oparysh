@@ -431,7 +431,11 @@ dependencies = [
 name = "oparysh-repo"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "oparysh-core",
+ "oparysh-verifier",
  "serde",
+ "sha2",
  "thiserror",
  "toml",
  "ureq",

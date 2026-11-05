@@ -9,3 +9,7 @@ ureq = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+oparysh-core = { workspace = true }
+oparysh-verifier = { workspace = true }
