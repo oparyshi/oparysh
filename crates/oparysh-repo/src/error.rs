@@ -68,6 +68,11 @@ pub enum RepoError {
     /// как имя каталога кэша.
     #[error("некорректное имя репозитория: {name}")]
     BadRepoName { name: String },
+
+    /// Запись `[[repositories.entries]]` конфига некорректна (например, нет
+    /// ни `path`, ни `url`).
+    #[error("некорректная запись репозитория {name} в [repositories]: {message}")]
+    EntryInvalid { name: String, message: String },
 }
 
 /// Специализированный Result для oparysh-repo.

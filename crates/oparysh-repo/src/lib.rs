@@ -30,6 +30,10 @@ pub use net::{
     cached_index_path, repo_cache_dir, CachedRepo, NetworkRepo, REPO_CACHE_DIR,
 };
 
+mod priority;
+
+pub use priority::{RepoRef, RepoSet, RepoSource};
+
 pub const INDEX_FILE: &str = "index.toml";
 pub const RECIPES_DIR: &str = "recipes";
 pub const DIST_DIR: &str = "dist";
