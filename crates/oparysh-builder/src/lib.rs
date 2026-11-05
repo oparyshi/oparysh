@@ -8,6 +8,9 @@
 //! - **7.2** — подстановки `${OPARYSH_*}` в шагах сборки.
 //! - **7.3** — планы сборочных систем `autoconf-make`, `make-only`, `custom`.
 //! - **7.4** — планы сборочных систем `cmake-ninja`, `cargo`, `meson`.
+//! - **7.5** — суженное окружение процесса: фиксированный `PATH`, компиляторы и
+//!   флаги (`CC/CXX/CPP/CFLAGS/…`) только из конфига/профиля, плюс явно указанные
+//!   переменные из `[build.extra].env` и `[build].env = {}`.
 
 use oparysh_core::config::OparyshConfig;
 use oparysh_core::recipe::Recipe;
@@ -36,6 +39,11 @@ pub struct BuildFlags {
     /// Префикс установки из рецепта (`[build.install].prefix`).
     pub prefix: String,
 }
+
+/// Фиксированный `PATH` для сборочных процессов (7.5).
+///
+/// `PATH` пользователя/шелла **не наследуется** — иначе сборки невоспроизводимы.
+pub const BUILD_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Ошибки вычисления флагов.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -95,6 +103,46 @@ pub fn compute_flags(config: &OparyshConfig, recipe: &Recipe) -> Result<BuildFla
     })
 }
 
+/// Канонические переменные окружения сборки (7.5).
+///
+/// Всегда вычисляются oparysh из активного профиля/конфига и применяются
+/// **последними**, поэтому `env = {}` рецепта не может случайно переопределить
+/// компилятор или флаги.
+fn canonical_build_env(flags: &BuildFlags, destdir: &str) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), BUILD_PATH.to_string());
+    env.insert("CC".to_string(), flags.cc.clone());
+    env.insert("CXX".to_string(), flags.cxx.clone());
+    env.insert("CPP".to_string(), flags.cpp.clone());
+    env.insert("CFLAGS".to_string(), flags.cflags.clone());
+    env.insert("CXXFLAGS".to_string(), flags.cxxflags.clone());
+    env.insert("LDFLAGS".to_string(), flags.ldflags.clone());
+    env.insert("MAKEOPTS".to_string(), flags.makeopts.clone());
+    env.insert("DESTDIR".to_string(), destdir.to_string());
+    env
+}
+
+/// Собрать суженное окружение для запуска шагов сборки (7.5).
+///
+/// Возвращается полный набор переменных: окружение шелла **не** примешивается.
+/// Порядок наложения (слева направо, побеждает правее):
+/// `[build.extra].env` → `recipe.build.env` → канонические переменные
+/// (`PATH`, `CC`, `CXX`, `CPP`, `CFLAGS`, `CXXFLAGS`, `LDFLAGS`, `MAKEOPTS`,
+/// `DESTDIR`). Тем самым пользовательские `CFLAGS`/`PATH` из шелла не проникают,
+/// а явно указанные `env = {}` сохраняются.
+pub fn narrowed_environment(
+    config: &OparyshConfig,
+    recipe: &Recipe,
+    flags: &BuildFlags,
+    destdir: &str,
+) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.extend(config.build.extra.env.clone());
+    env.extend(recipe.build.env.clone());
+    env.extend(canonical_build_env(flags, destdir));
+    env
+}
+
 /// Фазы сборки в порядке выполнения.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BuildPhase {
@@ -122,13 +170,27 @@ pub struct BuildStep {
     pub env: BTreeMap<String, String>,
 }
 
-/// Полный план сборки: команды по фазам и окружение.
+/// Полный план сборки: команды по фазам и суженное окружение.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildPlan {
     pub system: String,
     pub steps: Vec<BuildStep>,
-    /// Пользовательские `build.env` + обязательный `DESTDIR`.
+    /// Суженное окружение (7.5): фиксированный `PATH`, канонические
+    /// `CC/CXX/CPP/CFLAGS/…` из профиля и явные `env = {}` (+ `DESTDIR`).
     pub environment: BTreeMap<String, String>,
+}
+
+impl BuildPlan {
+    /// Окружение конкретного шага: общее окружение плана + `env` шага.
+    ///
+    /// Канонические переменные плана применяются последними, поэтому
+    /// пошаговый `env` может добавить переменные, но не переопределить
+    /// компилятор/флаги.
+    pub fn env_for_step(&self, step: &BuildStep) -> BTreeMap<String, String> {
+        let mut env = step.env.clone();
+        env.extend(self.environment.clone());
+        env
+    }
 }
 
 /// Ошибки построения плана сборки.
@@ -180,8 +242,7 @@ pub fn build_plan(
     let subs = Substitutions::new(flags.clone(), src_dir, destdir);
     let bs = &recipe.build.steps;
 
-    let mut environment = recipe.build.env.clone();
-    environment.insert("DESTDIR".to_string(), destdir.to_string());
+    let environment = narrowed_environment(config, recipe, &flags, destdir);
 
     let prefix = flags.prefix.clone();
     let install_root = join_install_root(destdir, &prefix);

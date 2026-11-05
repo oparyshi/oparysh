@@ -258,6 +258,82 @@ fn recipe_environment_is_preserved_and_destdir_added() {
 }
 
 #[test]
+fn narrowed_environment_has_fixed_path_and_profile_compilers() {
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe("cflags = \"-DHELLO=1\"\n");
+    let flags = compute_flags(&config, &recipe).unwrap();
+    let env = narrowed_environment(&config, &recipe, &flags, "/tmp/hello-1.0-destdir");
+
+    assert_eq!(env.get("PATH").unwrap(), BUILD_PATH);
+    assert_eq!(env.get("CC").unwrap(), "gcc");
+    assert_eq!(env.get("CXX").unwrap(), "g++");
+    assert_eq!(env.get("CPP").unwrap(), "cpp");
+    assert_eq!(env.get("CFLAGS").unwrap(), "-O2 -pipe -march=native -DHELLO=1");
+    assert_eq!(env.get("CXXFLAGS").unwrap(), "-O2 -pipe -march=native");
+    assert_eq!(env.get("LDFLAGS").unwrap(), "-Wl,-O1 -Wl,--as-needed");
+    assert_eq!(env.get("MAKEOPTS").unwrap(), "-j8 V=1");
+    assert_eq!(env.get("DESTDIR").unwrap(), "/tmp/hello-1.0-destdir");
+}
+
+#[test]
+fn narrowed_environment_does_not_inherit_shell_vars() {
+    // Пользовательские переменные из шелла не должны проникать в сборку.
+    #[allow(deprecated)]
+    {
+        std::env::set_var("CFLAGS", "-O0 -DSHELL");
+        std::env::set_var("PATH", "/evil/bin");
+        std::env::set_var("OPARYSH_SECRET", "leak");
+    }
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe("");
+    let flags = compute_flags(&config, &recipe).unwrap();
+    let env = narrowed_environment(&config, &recipe, &flags, "/tmp/x");
+
+    assert_eq!(env.get("CFLAGS").unwrap(), "-O2 -pipe -march=native");
+    assert_eq!(env.get("PATH").unwrap(), BUILD_PATH);
+    assert!(!env.contains_key("OPARYSH_SECRET"));
+
+    #[allow(deprecated)]
+    {
+        std::env::remove_var("CFLAGS");
+        std::env::remove_var("PATH");
+        std::env::remove_var("OPARYSH_SECRET");
+    }
+}
+
+#[test]
+fn explicit_env_is_preserved_but_cannot_override_canonical() {
+    let config = OparyshConfig::parse(
+        "[general]\njobs = 4\n\n[toolchain]\ncc = \"gcc\"\n\n[profile.release]\ncflags = \"\"\n\n[build.extra]\nenv = { EXTRA = \"from-config\", CC = \"clang\" }\n",
+    )
+    .unwrap();
+    let recipe = make_recipe(r#"env = { LIBS = "-lm", CFLAGS = "-O0" }"#);
+    let flags = compute_flags(&config, &recipe).unwrap();
+    let env = narrowed_environment(&config, &recipe, &flags, "/tmp/x");
+
+    // Явно указанные переменные сохранены.
+    assert_eq!(env.get("EXTRA").unwrap(), "from-config");
+    assert_eq!(env.get("LIBS").unwrap(), "-lm");
+    // Канонические переменные профиля побеждают `env` рецепта/конфига.
+    assert_eq!(env.get("CC").unwrap(), "gcc");
+    assert_eq!(env.get("CFLAGS").unwrap(), "");
+}
+
+#[test]
+fn env_for_step_merges_step_and_plan() {
+    let plan = plan_for(r#"env = { LIBS = "-lm" }"#);
+    let install = plan
+        .steps
+        .iter()
+        .find(|s| s.phase == BuildPhase::Install)
+        .unwrap();
+    let env = plan.env_for_step(install);
+    assert_eq!(env.get("LIBS").unwrap(), "-lm");
+    assert_eq!(env.get("DESTDIR").unwrap(), "/tmp/hello-1.0-destdir");
+    assert_eq!(env.get("PATH").unwrap(), BUILD_PATH);
+}
+
+#[test]
 fn custom_without_steps_is_error() {
     let config = OparyshConfig::parse(CONF).unwrap();
     let recipe = make_recipe(r#"system = "custom""#);
