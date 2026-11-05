@@ -38,6 +38,10 @@ mod sync;
 
 pub use sync::{open_synced, sync_repos, SyncKind, SyncOutcome};
 
+mod search;
+
+pub use search::{search_repos, SearchHit, SearchOutcome, SearchPattern};
+
 pub const INDEX_FILE: &str = "index.toml";
 pub const RECIPES_DIR: &str = "recipes";
 pub const DIST_DIR: &str = "dist";

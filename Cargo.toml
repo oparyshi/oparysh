@@ -30,6 +30,8 @@ hex = "0.4"
 rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 # сеть (синхронный HTTP-клиент)
 ureq = { version = "3", features = ["gzip"] }
+# регулярные выражения (oparysh search /regex/)
+regex = "1"
 # ошибки
 anyhow = "1"
 thiserror = "2"

@@ -78,6 +78,11 @@ pub enum RepoError {
     /// ни `path`, ни `url`).
     #[error("некорректная запись репозитория {name} в [repositories]: {message}")]
     EntryInvalid { name: String, message: String },
+
+    /// Некорректный шаблон поиска (битый glob/regex) — код возврата **2**
+    /// (неверные аргументы CLI, DOCS §11).
+    #[error("некорректный шаблон поиска «{pattern}»: {message}")]
+    BadPattern { pattern: String, message: String },
 }
 
 /// Специализированный Result для oparysh-repo.

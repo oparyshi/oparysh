@@ -11,6 +11,7 @@ fn repo_exit_code(e: &RepoError) -> i32 {
     match e {
         RepoError::Network { .. } | RepoError::BadRepoName { .. } => 5,
         RepoError::RecipeShaMismatch { .. } | RepoError::SourceShaMismatch { .. } => 6,
+        RepoError::BadPattern { .. } => 2,
         RepoError::PkgNotFound { .. }
         | RepoError::NameNotFound { .. }
         | RepoError::RepoNotFound { .. } => 3,
@@ -82,6 +83,13 @@ fn format_date_utc(ts: u64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `oparysh search <pattern>`: поиск по имени/описанию/тегам во всех репозиториях.
+fn run_search(pattern: &str) -> oparysh_repo::RepoResult<oparysh_repo::SearchOutcome> {
+    let config = load_config(None);
+    let pattern = oparysh_repo::SearchPattern::parse(pattern)?;
+    oparysh_repo::search_repos(&config.repositories.entries, &cache_dir(&config), &pattern)
 }
 
 /// `oparysh repo add <name> <url|path>`: добавить репозиторий в конфиг.
@@ -189,6 +197,11 @@ enum Command {
         #[arg(value_name = "REPO")]
         repos: Vec<String>,
     },
+    /// Поиск по имени/описанию/тегам (glob или /regex/) (stage 4.6)
+    Search {
+        /// Шаблон: glob (`gcc*`, `*-git`) или регулярное выражение в слэшах (`/^lib.*/`)
+        pattern: String,
+    },
     /// Управление репозиториями в конфиге (stage 4.5)
     Repo {
         #[command(subcommand)]
@@ -267,6 +280,26 @@ fn main() {
                             o.packages,
                             o.index_path.display()
                         ),
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(repo_exit_code(&e));
+            }
+        },
+        Some(Command::Search { pattern }) => match run_search(&pattern) {
+            Ok(outcome) => {
+                for (name, reason) in &outcome.skipped {
+                    eprintln!("WARN: репозиторий «{name}» пропущен: {reason}");
+                }
+                if outcome.hits.is_empty() {
+                    println!("ничего не найдено по шаблону «{pattern}»");
+                } else {
+                    println!("{name:<24} {version:<12} {repo:<16} ОПИСАНИЕ",
+                        name = "ИМЯ", version = "ВЕРСИЯ", repo = "РЕПО");
+                    for h in &outcome.hits {
+                        println!("{:<24} {:<12} {:<16} {}", h.name, h.version, h.repo, h.desc);
                     }
                 }
             }
