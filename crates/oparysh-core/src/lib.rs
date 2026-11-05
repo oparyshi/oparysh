@@ -5,3 +5,4 @@ pub mod validate;
 pub mod version;
 pub mod index;
 pub mod config;
+pub mod config_edit;
