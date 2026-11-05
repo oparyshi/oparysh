@@ -91,8 +91,8 @@
 
 - [x] 7.1. Вычисление финальных флагов (раздел 6): `CFLAGS = profile + build.extra + recipe.build.cflags`, `MAKEOPTS = -j{jobs} + …`, приоритет `cc`: config → recipe
 - [x] 7.2. Подстановки `${OPARYSH_PREFIX}` и др. в шагах
-- [ ] 7.3. Сборочные системы: `autoconf-make`, затем `make-only`, `custom` (через `[build.steps]`)
-- [ ] 7.4. Сборочные системы: `cmake-ninja`, `cargo`, `meson`
+- [x] 7.3. Сборочные системы: `autoconf-make`, затем `make-only`, `custom` (через `[build.steps]`)
+- [x] 7.4. Сборочные системы: `cmake-ninja`, `cargo`, `meson`
 - [ ] 7.5. Суженное окружение процесса: фиксированный `PATH`, `CC/CXX/CPP/CFLAGS/…` только из профиля;_env из `env = {}`
 - [ ] 7.6. Логи сборки в `logs/<pkg>-<ver>-<date>.log`; шаг упал → сборка прервана, `build/` сохранён, код **7**
 - [ ] 7.7. Перекрытия (`--set cflags=… --set cc=…`, `--jobs N`) только на одну сборку

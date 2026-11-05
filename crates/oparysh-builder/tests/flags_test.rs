@@ -154,3 +154,121 @@ fn plain_text_without_vars_unchanged() {
     let s = subs();
     assert_eq!(substitute("make install", &s).unwrap(), "make install");
 }
+
+fn plan_for(build_section: &str) -> BuildPlan {
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe(build_section);
+    build_plan(
+        &config,
+        &recipe,
+        "/build/hello-1.0",
+        "/tmp/hello-1.0-destdir",
+    )
+    .unwrap()
+}
+
+fn argv(plan: &BuildPlan, phase: BuildPhase) -> Vec<String> {
+    plan.steps
+        .iter()
+        .find(|s| s.phase == phase)
+        .unwrap()
+        .argv
+        .clone()
+}
+
+#[test]
+fn autoconf_make_default_plan() {
+    let plan = plan_for("");
+    assert_eq!(plan.system, "autoconf-make");
+    assert_eq!(argv(&plan, BuildPhase::Prepare), ["./configure", "--prefix=/usr/local"]);
+    assert_eq!(argv(&plan, BuildPhase::Compile), ["make", "-j8", "V=1"]);
+    assert_eq!(
+        argv(&plan, BuildPhase::Install),
+        ["make", "install", "DESTDIR=/tmp/hello-1.0-destdir"]
+    );
+    assert_eq!(plan.environment.get("DESTDIR").unwrap(), "/tmp/hello-1.0-destdir");
+}
+
+#[test]
+fn make_only_has_no_prepare_step() {
+    let plan = plan_for(r#"system = "make-only""#);
+    assert_eq!(
+        plan.steps.iter().map(|s| s.phase).collect::<Vec<_>>(),
+        [BuildPhase::Compile, BuildPhase::Install]
+    );
+}
+
+#[test]
+fn custom_uses_only_explicit_steps_and_substitutes() {
+    let plan = plan_for(r#"system = "custom"
+[build.steps]
+prepare = ["echo", "${OPARYSH_PREFIX}"]
+compile = ["make", "${OPARYSH_MAKEOPTS}"]
+install = ["make", "install", "DESTDIR=${OPARYSH_DESTDIR}"]
+"#);
+    assert_eq!(argv(&plan, BuildPhase::Prepare), ["echo", "/usr/local"]);
+    assert_eq!(argv(&plan, BuildPhase::Compile), ["make", "-j8 V=1"]);
+    assert_eq!(argv(&plan, BuildPhase::Install), ["make", "install", "DESTDIR=/tmp/hello-1.0-destdir"]);
+}
+
+#[test]
+fn partial_steps_override_only_their_phase() {
+    let plan = plan_for(r#"system = "autoconf-make"
+[build.steps]
+compile = ["gmake", "all"]
+"#);
+    assert_eq!(argv(&plan, BuildPhase::Prepare), ["./configure", "--prefix=/usr/local"]);
+    assert_eq!(argv(&plan, BuildPhase::Compile), ["gmake", "all"]);
+    assert_eq!(argv(&plan, BuildPhase::Install).first().unwrap(), "make");
+}
+
+#[test]
+fn cmake_ninja_default_plan() {
+    let plan = plan_for(r#"system = "cmake-ninja""#);
+    assert_eq!(argv(&plan, BuildPhase::Prepare), ["cmake", "-G", "Ninja", "-DCMAKE_INSTALL_PREFIX=/usr/local", "."]);
+    assert_eq!(argv(&plan, BuildPhase::Compile), ["ninja"]);
+    assert_eq!(argv(&plan, BuildPhase::Install), ["ninja", "install"]);
+    assert_eq!(plan.steps.iter().find(|s| s.phase == BuildPhase::Install).unwrap().env.get("DESTDIR").unwrap(), "/tmp/hello-1.0-destdir");
+}
+
+#[test]
+fn cargo_default_plan_joins_destdir_and_prefix() {
+    let plan = plan_for(r#"system = "cargo""#);
+    assert_eq!(argv(&plan, BuildPhase::Compile), ["cargo", "build", "--release"]);
+    assert_eq!(
+        argv(&plan, BuildPhase::Install),
+        ["cargo", "install", "--root=/tmp/hello-1.0-destdir/usr/local"]
+    );
+    assert!(plan.steps.iter().all(|s| s.phase != BuildPhase::Prepare));
+}
+
+#[test]
+fn meson_default_plan() {
+    let plan = plan_for(r#"system = "meson""#);
+    assert_eq!(argv(&plan, BuildPhase::Prepare), ["meson", "setup", "--prefix=/usr/local", "build"]);
+    assert_eq!(argv(&plan, BuildPhase::Compile), ["ninja", "-C", "build"]);
+    assert_eq!(argv(&plan, BuildPhase::Install), ["ninja", "-C", "build", "install"]);
+}
+
+#[test]
+fn recipe_environment_is_preserved_and_destdir_added() {
+    let plan = plan_for(r#"env = { LIBS = "-lm" }"#);
+    assert_eq!(plan.environment.get("LIBS").unwrap(), "-lm");
+    assert_eq!(plan.environment.get("DESTDIR").unwrap(), "/tmp/hello-1.0-destdir");
+}
+
+#[test]
+fn custom_without_steps_is_error() {
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe(r#"system = "custom""#);
+    let err = build_plan(&config, &recipe, "/build/x", "/tmp/x").unwrap_err();
+    assert_eq!(err, BuildPlanError::EmptyCustomSteps);
+}
+
+#[test]
+fn unknown_system_is_error() {
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe(r#"system = "tup""#);
+    let err = build_plan(&config, &recipe, "/build/x", "/tmp/x").unwrap_err();
+    assert_eq!(err, BuildPlanError::UnknownSystem("tup".into()));
+}

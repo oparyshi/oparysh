@@ -6,9 +6,12 @@
 //!   `MAKEOPTS = -j{jobs} + config makeopts + recipe makeopts`, приоритет `cc`:
 //!   рецепт → конфиг (если у рецепта `cc` непуст, он побеждает).
 //! - **7.2** — подстановки `${OPARYSH_*}` в шагах сборки.
+//! - **7.3** — планы сборочных систем `autoconf-make`, `make-only`, `custom`.
+//! - **7.4** — планы сборочных систем `cmake-ninja`, `cargo`, `meson`.
 
 use oparysh_core::config::OparyshConfig;
 use oparysh_core::recipe::Recipe;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Финальные флаги сборки, вычисленные из конфига и рецепта.
@@ -90,6 +93,156 @@ pub fn compute_flags(config: &OparyshConfig, recipe: &Recipe) -> Result<BuildFla
         jobs,
         prefix: recipe.build.install.prefix.clone(),
     })
+}
+
+/// Фазы сборки в порядке выполнения.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BuildPhase {
+    Prepare,
+    Compile,
+    Install,
+}
+
+impl BuildPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::Compile => "compile",
+            Self::Install => "install",
+        }
+    }
+}
+
+/// Один шаг сборки без shell-интерполяции.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildStep {
+    pub phase: BuildPhase,
+    pub argv: Vec<String>,
+    /// Переменные, добавляемые только на этот шаг; `DESTDIR` находится в плане.
+    pub env: BTreeMap<String, String>,
+}
+
+/// Полный план сборки: команды по фазам и окружение.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildPlan {
+    pub system: String,
+    pub steps: Vec<BuildStep>,
+    /// Пользовательские `build.env` + обязательный `DESTDIR`.
+    pub environment: BTreeMap<String, String>,
+}
+
+/// Ошибки построения плана сборки.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum BuildPlanError {
+    #[error(transparent)]
+    Flags(#[from] FlagError),
+    #[error(transparent)]
+    Substitution(#[from] SubstError),
+    #[error("неизвестная сборочная система `{0}`")]
+    UnknownSystem(String),
+    #[error("`system = \"custom\"` не может быть собран: [build.steps] не содержит ни одного шага")]
+    EmptyCustomSteps,
+}
+
+fn split_make_opts(value: &str) -> Vec<String> {
+    value.split_whitespace().map(ToString::to_string).collect()
+}
+
+fn join_install_root(destdir: &str, prefix: &str) -> String {
+    format!("{}/{}", destdir.trim_end_matches('/'), prefix.trim_start_matches('/'))
+}
+
+fn phase_step(phase: BuildPhase, argv: Vec<String>, env: BTreeMap<String, String>) -> BuildStep {
+    BuildStep { phase, argv, env }
+}
+
+fn custom_phase(
+    phase: BuildPhase,
+    args: &Option<Vec<String>>,
+    subs: &Substitutions,
+) -> Result<Option<BuildStep>, SubstError> {
+    args.as_ref()
+        .map(|args| substitute_args(args, subs).map(|argv| phase_step(phase, argv, BTreeMap::new())))
+        .transpose()
+}
+
+/// Построить план сборки по `[build].system` (7.3–7.4).
+///
+/// Явные `[build.steps]` переопределяют соответствующую фазу выбранной системы;
+/// отсутствующие фазы берутся из дефолтов. Для `custom` дефолтов нет.
+pub fn build_plan(
+    config: &OparyshConfig,
+    recipe: &Recipe,
+    src_dir: &str,
+    destdir: &str,
+) -> Result<BuildPlan, BuildPlanError> {
+    let flags = compute_flags(config, recipe)?;
+    let subs = Substitutions::new(flags.clone(), src_dir, destdir);
+    let bs = &recipe.build.steps;
+
+    let mut environment = recipe.build.env.clone();
+    environment.insert("DESTDIR".to_string(), destdir.to_string());
+
+    let prefix = flags.prefix.clone();
+    let install_root = join_install_root(destdir, &prefix);
+    let mut defaults: Vec<BuildStep> = match recipe.build.system.as_str() {
+        "autoconf-make" => vec![
+            phase_step(BuildPhase::Prepare, vec!["./configure".into(), format!("--prefix={prefix}")], BTreeMap::new()),
+            phase_step(BuildPhase::Compile, std::iter::once("make".to_string()).chain(split_make_opts(&flags.makeopts)).collect(), BTreeMap::new()),
+            phase_step(BuildPhase::Install, vec!["make".into(), "install".into(), format!("DESTDIR={destdir}")], BTreeMap::new()),
+        ],
+        "make-only" => vec![
+            phase_step(BuildPhase::Compile, std::iter::once("make".to_string()).chain(split_make_opts(&flags.makeopts)).collect(), BTreeMap::new()),
+            phase_step(BuildPhase::Install, vec!["make".into(), "install".into(), format!("DESTDIR={destdir}")], BTreeMap::new()),
+        ],
+        "cmake-ninja" => {
+            let mut env = BTreeMap::new();
+            env.insert("DESTDIR".to_string(), destdir.to_string());
+            vec![
+                phase_step(BuildPhase::Prepare, vec!["cmake".into(), "-G".into(), "Ninja".into(), format!("-DCMAKE_INSTALL_PREFIX={prefix}"), ".".into()], BTreeMap::new()),
+                phase_step(BuildPhase::Compile, vec!["ninja".into()], BTreeMap::new()),
+                phase_step(BuildPhase::Install, vec!["ninja".into(), "install".into()], env),
+            ]
+        }
+        "cargo" => vec![
+            phase_step(BuildPhase::Compile, vec!["cargo".into(), "build".into(), "--release".into()], BTreeMap::new()),
+            phase_step(BuildPhase::Install, vec!["cargo".into(), "install".into(), format!("--root={install_root}")], BTreeMap::new()),
+        ],
+        "meson" => {
+            let mut env = BTreeMap::new();
+            env.insert("DESTDIR".to_string(), destdir.to_string());
+            vec![
+                phase_step(BuildPhase::Prepare, vec!["meson".into(), "setup".into(), format!("--prefix={prefix}"), "build".into()], BTreeMap::new()),
+                phase_step(BuildPhase::Compile, vec!["ninja".into(), "-C".into(), "build".into()], BTreeMap::new()),
+                phase_step(BuildPhase::Install, vec!["ninja".into(), "-C".into(), "build".into(), "install".into()], env),
+            ]
+        }
+        "custom" => Vec::new(),
+        other => return Err(BuildPlanError::UnknownSystem(other.to_string())),
+    };
+
+    if recipe.build.system == "custom" {
+        defaults.extend(custom_phase(BuildPhase::Prepare, &bs.prepare, &subs)?.into_iter());
+        defaults.extend(custom_phase(BuildPhase::Compile, &bs.compile, &subs)?.into_iter());
+        defaults.extend(custom_phase(BuildPhase::Install, &bs.install, &subs)?.into_iter());
+        if defaults.is_empty() {
+            return Err(BuildPlanError::EmptyCustomSteps);
+        }
+    } else {
+        for (phase, override_args) in [
+            (BuildPhase::Prepare, &bs.prepare),
+            (BuildPhase::Compile, &bs.compile),
+            (BuildPhase::Install, &bs.install),
+        ] {
+            if let Some(step) = custom_phase(phase, override_args, &subs)? {
+                defaults.retain(|candidate| candidate.phase != phase);
+                defaults.push(step);
+            }
+        }
+        defaults.sort_by_key(|step| step.phase);
+    }
+
+    Ok(BuildPlan { system: recipe.build.system.clone(), steps: defaults, environment })
 }
 
 /// Набор подстановок `${OPARYSH_*}` для шагов сборки (7.2).
