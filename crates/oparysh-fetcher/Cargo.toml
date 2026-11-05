@@ -9,3 +9,9 @@ ureq = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+xz2 = { workspace = true }
+zstd = { workspace = true }
+oparysh-core = { workspace = true }
+oparysh-verifier = { workspace = true }

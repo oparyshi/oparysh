@@ -33,6 +33,11 @@ rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 ureq = { version = "3", features = ["gzip"] }
 # регулярные выражения (oparysh search /regex/)
 regex = "1"
+# архивы (этап 6.3)
+tar = "0.4"
+flate2 = "1"
+xz2 = "0.1"
+zstd = "0.13"
 # ошибки
 anyhow = "1"
 thiserror = "2"
@@ -46,3 +51,4 @@ oparysh-verifier = { path = "crates/oparysh-verifier" }
 oparysh-db = { path = "crates/oparysh-db" }
 oparysh-repo = { path = "crates/oparysh-repo" }
 oparysh-resolver = { path = "crates/oparysh-resolver" }
+oparysh-fetcher = { path = "crates/oparysh-fetcher" }
