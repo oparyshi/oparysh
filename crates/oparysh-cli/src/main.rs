@@ -829,6 +829,23 @@ enum Command {
         #[command(subcommand)]
         action: RepoCommand,
     },
+    /// Очистить кэши исходников/сборки/логов (stage 6.6)
+    #[command(group = clap::ArgGroup::new("clean_scope").required(true).multiple(false)
+        .args(["src", "build", "logs", "all"]))]
+    Clean {
+        /// Очистить кэш исходников <db_dir>/src/
+        #[arg(long)]
+        src: bool,
+        /// Очистить рабочие каталоги сборки <db_dir>/build/
+        #[arg(long)]
+        build: bool,
+        /// Очистить логи сборок <db_dir>/logs/
+        #[arg(long)]
+        logs: bool,
+        /// Очистить всё: src + build + logs
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -863,6 +880,48 @@ fn split_plan_args(args: &[String]) -> (Vec<String>, Vec<String>) {
         }
     }
     (specs, features)
+}
+
+/// `oparysh clean` (stage 6.6): удалить выбранные подкаталоги базы,
+/// напечатав освобождённый объём. Ошибка удаления — общая ошибка **1**.
+fn run_clean(db: &Path, src: bool, build: bool, logs: bool) {
+    for (flag, dir) in [
+        ("src", db.join("src")),
+        ("build", db.join("build")),
+        ("logs", db.join("logs")),
+    ] {
+        let selected = match flag {
+            "src" => src,
+            "build" => build,
+            _ => logs,
+        };
+        if !selected || !dir.exists() {
+            continue;
+        }
+        let bytes = dir_size(&dir).unwrap_or(0);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => println!("clean {flag:<5} {} — освобождено {} байт", dir.display(), bytes),
+            Err(e) => {
+                eprintln!("ERROR: не удалось удалить {}: {e}", dir.display());
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// Суммарный размер файлов каталога (рекурсивно).
+fn dir_size(dir: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_dir() {
+            total += dir_size(&entry.path())?;
+        } else {
+            total += meta.len();
+        }
+    }
+    Ok(total)
 }
 
 fn main() {
@@ -992,6 +1051,9 @@ fn main() {
                 }
             },
         },
+        Some(Command::Clean { src, build, logs, all }) => {
+            run_clean(&db_dir(&load_config(None)), src || all, build || all, logs || all);
+        }
         None => {
             let mut cmd = Cli::command();
             cmd.print_help().unwrap();

@@ -142,6 +142,28 @@ fn bad_hash_on_download_not_cached() {
     assert!(leftovers.is_empty());
 }
 
+// ---------- 6.5: сеть недоступна → код 5 ----------
+
+#[test]
+fn network_unavailable_is_exit_code_5() {
+    let tmp = TestDir::new("netfail");
+    let db = tmp.path().join("db");
+    let sha = sha256_str(b"any");
+    // Порт 1 на localhost — соединение гарантированно отклонено.
+    let source = source_with(Some("http://127.0.0.1:1/hello-1.0.tar.gz"), None, Some(&sha));
+    let req = FetchRequest {
+        name: "hello",
+        version: "1.0",
+        source: &source,
+        repo_dist: None,
+    };
+    let err = fetch_source(&db, &req).unwrap_err();
+    assert!(matches!(err, FetchError::Network { .. }));
+    assert_eq!(err.exit_code(), 5, "сеть недоступна → код 5 (DOCS §11)");
+    // Ничего не должно остаться в кэше.
+    assert!(src_cache_dir(&db).read_dir().map(|mut d| d.next().is_none()).unwrap_or(true));
+}
+
 #[test]
 fn missing_sha_is_fatal() {
     let tmp = TestDir::new("missingsha");
