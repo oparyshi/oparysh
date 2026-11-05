@@ -24,6 +24,12 @@ mod error;
 
 pub use error::{RepoError, RepoResult};
 
+mod net;
+
+pub use net::{
+    cached_index_path, repo_cache_dir, CachedRepo, NetworkRepo, REPO_CACHE_DIR,
+};
+
 pub const INDEX_FILE: &str = "index.toml";
 pub const RECIPES_DIR: &str = "recipes";
 pub const DIST_DIR: &str = "dist";

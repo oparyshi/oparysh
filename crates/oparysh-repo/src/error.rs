@@ -58,6 +58,16 @@ pub enum RepoError {
 
     #[error("несколько файлов в dist/ для {name}:{version} (каталог {path})")]
     AmbiguousDist { name: String, version: String, path: String },
+
+    /// Сбой HTTP-запроса (сеть, таймаут, статус не 2xx) — по DOCS §11 это
+    /// код возврата **5** (ошибка загрузки).
+    #[error("не удалось скачать {url}: {source}")]
+    Network { url: String, source: ureq::Error },
+
+    /// Имя репозитория, полученное из index.toml, нельзя использовать
+    /// как имя каталога кэша.
+    #[error("некорректное имя репозитория: {name}")]
+    BadRepoName { name: String },
 }
 
 /// Специализированный Result для oparysh-repo.
