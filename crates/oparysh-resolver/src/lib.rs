@@ -15,6 +15,8 @@
 //!   разрешён (5.5);
 //! - [`plan::build_order`] / [`plan::pending_build_order`] — топологическая
 //!   сортировка (алгоритм Кана), порядок сборки (5.6);
+//! - [`plan::render_plan`] — план перед работами и подтверждение через CLI
+//!   (5.7);
 //! - [`repo_source::RepoPackageSource`] — источник пакетов поверх
 //!   `[repositories]` конфига (локальные репозитории и кэш индексов).
 
@@ -33,5 +35,5 @@ pub use collect::{
 };
 pub use error::{ResolveError, ResolveResult};
 pub use installed::{InstalledPkg, InstalledSource};
-pub use plan::{build_order, pending_build_order};
+pub use plan::{build_order, format_bytes, pending_build_order, render_plan};
 pub use repo_source::RepoPackageSource;

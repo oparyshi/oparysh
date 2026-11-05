@@ -34,6 +34,21 @@ impl RepoPackageSource {
         })
     }
 
+    /// Известный размер тарбола источника для выбранного кандидата.
+    ///
+    /// Локальные репозитории читают размер файла из `dist/`; сетевые до
+    /// скачивания обычно неизвестны (`None`), поэтому план честно показывает
+    /// размер только для локальных источников.
+    pub fn source_size(&self, candidate: &Candidate) -> Option<u64> {
+        match self.source_of(&candidate.repo)? {
+            RepoSource::Local(root) => LocalRepo::open(root).ok()?.dist_file(
+                &candidate.name,
+                &candidate.version_str,
+            ).ok()?.metadata().ok().map(|m| m.len()),
+            RepoSource::Network(_) => None,
+        }
+    }
+
     fn source_of(&self, repo_name: &str) -> Option<&RepoSource> {
         self.set.find(repo_name).map(|r| &r.source)
     }

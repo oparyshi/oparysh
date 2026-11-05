@@ -405,6 +405,7 @@ dependencies = [
  "oparysh-core",
  "oparysh-db",
  "oparysh-repo",
+ "oparysh-resolver",
  "oparysh-verifier",
 ]
 

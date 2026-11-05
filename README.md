@@ -86,6 +86,9 @@ oparysh sync && oparysh upgrade && oparysh autoremove
 oparysh sync                 # обновить индексы репозиториев
 oparysh search <pattern>     # поиск по имени/описанию/тегам
 oparysh info <pkg>           # метаданные пакета
+oparysh plan <pkg…>          # показать план сборки и запросить подтверждение
+oparysh deps <pkg> [--tree]  # зависимости пакета
+oparysh rdeps <pkg>          # обратные зависимости установленных пакетов
 oparysh install <pkg…>       # разрешить → собрать → установить
 oparysh remove <pkg…>        # удалить (отказ, если кто-то зависит)
 oparysh upgrade              # обновить установленные пакеты

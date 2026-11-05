@@ -3,6 +3,7 @@ use oparysh_core::config::OparyshConfig;
 use oparysh_core::config_edit;
 use oparysh_db::{rebuild_db_from_backup, Database, Package};
 use oparysh_repo::RepoError;
+use oparysh_resolver::{plan::render_plan, RepoPackageSource, ResolveOptions};
 use oparysh_verifier::verify_tarball;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,20 @@ fn repo_exit_code(e: &RepoError) -> i32 {
         RepoError::PkgNotFound { .. }
         | RepoError::NameNotFound { .. }
         | RepoError::RepoNotFound { .. } => 3,
+        _ => 1,
+    }
+}
+
+/// Код возврата для ошибки resolver по DOCS §11.
+fn resolve_exit_code(e: &oparysh_resolver::ResolveError) -> i32 {
+    use oparysh_resolver::ResolveError;
+    match e {
+        ResolveError::Repo(e) => repo_exit_code(e),
+        ResolveError::Unresolved { .. }
+        | ResolveError::VersionConflict { .. }
+        | ResolveError::Conflict { .. }
+        | ResolveError::BuildCycle { .. } => 4,
+        ResolveError::AmbiguousProvider { .. } => 2,
         _ => 1,
     }
 }
@@ -86,6 +101,328 @@ fn split_pkg_spec(spec: &str) -> (String, Option<String>) {
             (name.to_string(), Some(version.to_string()))
         }
         _ => (spec.to_string(), None),
+    }
+}
+
+/// Разобрать `pkg[@ver]` в требование: `@` означает точную версию.
+fn dep_req_from_spec(spec: &str) -> Result<oparysh_core::version::DepReq, String> {
+    let (name, version) = split_pkg_spec(spec);
+    let raw = match version {
+        Some(version) => format!("{name}={version}"),
+        None => name,
+    };
+    oparysh_core::version::DepReq::parse(&raw).map_err(|e| e.to_string())
+}
+
+/// Разрешить цели с интерактивным выбором неоднозначного поставщика.
+/// Возвращает граф, источник и итоговые опции поставщика.
+fn resolve_cli(
+    specs: &[String],
+    features: &[String],
+    config: &OparyshConfig,
+    assume_yes: bool,
+    report_errors: bool,
+) -> Result<(oparysh_resolver::RequirementSet, RepoPackageSource), i32> {
+    let cache = cache_dir(config);
+    let source = match RepoPackageSource::new(&config.repositories.entries, &cache) {
+        Ok(source) => source,
+        Err(e) => {
+            if report_errors { eprintln!("ERROR: {e}"); }
+            return Err(resolve_exit_code(&e));
+        }
+    };
+    let targets = specs
+        .iter()
+        .map(|spec| dep_req_from_spec(spec))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            if report_errors { eprintln!("ERROR: {e}"); }
+            2
+        })?;
+
+    let db = open_db(config);
+    let mut provider = None;
+    loop {
+        let options = ResolveOptions {
+            features: features.to_vec(),
+            installed: Some(&db),
+            provider: provider.clone(),
+        };
+        match oparysh_resolver::resolve(&targets, &source, &options) {
+            Ok(set) => return Ok((set, source)),
+            Err(oparysh_resolver::ResolveError::AmbiguousProvider {
+                virtual_name,
+                providers,
+            }) => {
+                if assume_yes || !report_errors {
+                    if report_errors {
+                        eprintln!("ERROR: неоднозначный поставщик виртуального пакета {virtual_name}: {}; выберите поставщика интерактивно", providers.join(", "));
+                    }
+                    return Err(2);
+                }
+                eprintln!("Выберите поставщика виртуального пакета {virtual_name}:");
+                for (index, provider_name) in providers.iter().enumerate() {
+                    eprintln!("  {}) {provider_name}", index + 1);
+                }
+                eprint!("Ваш выбор [1-{}]: ", providers.len());
+                if std::io::Write::flush(&mut std::io::stderr()).is_err() {
+                    return Err(1);
+                }
+                let mut choice = String::new();
+                if std::io::stdin().read_line(&mut choice).is_err() {
+                    return Err(1);
+                }
+                let index = choice.trim().parse::<usize>().ok().and_then(|n| n.checked_sub(1));
+                let selected = index.and_then(|i| providers.get(i)).cloned();
+                match selected {
+                    Some(selected) => provider = Some(selected),
+                    None => {
+                        eprintln!("ERROR: некорректный выбор");
+                        return Err(2);
+                    }
+                }
+            }
+            Err(e) => {
+                if report_errors { eprintln!("ERROR: {e}"); }
+                return Err(resolve_exit_code(&e));
+            }
+        }
+    }
+}
+
+/// Известные размеры исходников для всех ожидающих сборки узлов.
+fn source_sizes(
+    set: &oparysh_resolver::RequirementSet,
+    source: &RepoPackageSource,
+) -> std::collections::BTreeMap<String, Option<u64>> {
+    oparysh_resolver::pending_build_order(set)
+        .into_iter()
+        .map(|name| {
+            let node = &set.nodes[&name];
+            let candidate = oparysh_resolver::Candidate {
+                name: node.name.clone(),
+                version: node.version.clone(),
+                version_str: node.version_str.clone(),
+                build: node.build,
+                repo: node.repo.clone(),
+            };
+            (name, source.source_size(&candidate))
+        })
+        .collect()
+}
+
+/// Показать план и запросить подтверждение. Возвращает true, если можно продолжать.
+fn confirm_plan(
+    plan: &str,
+    assume_yes: bool,
+) -> bool {
+    println!("{plan}");
+    if assume_yes {
+        return true;
+    }
+    print!(" Proceed? [y/N] ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// `oparysh plan`: разрешить цели и показать план без изменений в системе.
+fn run_plan(specs: &[String], features: &[String], assume_yes: bool) {
+    let config = load_config(None);
+    let (set, source) = match resolve_cli(specs, features, &config, assume_yes, true) {
+        Ok(value) => value,
+        Err(code) => std::process::exit(code),
+    };
+    let plan = render_plan(
+        &set,
+        config.general.jobs,
+        &source_sizes(&set, &source),
+    );
+    if !confirm_plan(&plan, assume_yes) {
+        println!("Отменено; изменения не внесены");
+        return;
+    }
+    println!("План подтверждён; установка будет выполнена командами этапов 6–8");
+}
+
+/// Рекурсивная печать дочерних узлов с защитой от runtime-циклов.
+/// `prefix` — отступ, соответствующий уровню `parent`.
+fn print_dep_children(
+    set: &oparysh_resolver::RequirementSet,
+    parent: &str,
+    prefix: &str,
+    stack: &mut Vec<String>,
+) {
+    let Some(node) = set.nodes.get(parent) else { return };
+    for (index, dep) in node.dependencies.iter().enumerate() {
+        let is_last = index + 1 == node.dependencies.len();
+        let branch = if is_last { "└─ " } else { "├─ " };
+        let Some(dep_node) = set.nodes.get(dep) else {
+            println!("{prefix}{branch}{dep}");
+            continue;
+        };
+        let marker = if dep_node.installed { " (installed)" } else { "" };
+        let virtual_marker = dep_node
+            .provided_for
+            .as_deref()
+            .map(|v| format!(" provides {v}"))
+            .unwrap_or_default();
+        println!("{prefix}{branch}{} {}{}{}", dep_node.name, dep_node.version_str, marker, virtual_marker);
+        let child_prefix = format!("{prefix}{}", if is_last { "   " } else { "│  " });
+        if stack.iter().any(|n| n == dep) {
+            println!("{child_prefix}(cycle)");
+            continue;
+        }
+        stack.push(dep.clone());
+        print_dep_children(set, dep, &child_prefix, stack);
+        stack.pop();
+    }
+}
+
+/// Печать корня и всего дерева зависимостей.
+fn print_dep_tree(set: &oparysh_resolver::RequirementSet, root: &str) {
+    let Some(node) = set.nodes.get(root) else { return };
+    let marker = if node.installed { " (installed)" } else { "" };
+    let virtual_marker = node
+        .provided_for
+        .as_deref()
+        .map(|v| format!(" provides {v}"))
+        .unwrap_or_default();
+    println!("{} {}{}{}", node.name, node.version_str, marker, virtual_marker);
+    print_dep_children(set, root, "", &mut vec![root.to_string()]);
+}
+
+/// Обратные зависимости среди установленных пакетов.
+fn reverse_deps_installed(db: &Database, target: &str) -> oparysh_db::DbResult<Vec<(String, String)>> {
+    let mut result = Vec::new();
+    for pkg in db.list_packages()? {
+        for dep in db.get_deps(&pkg.name)? {
+            if dep.dep_name == target {
+                result.push((pkg.name.clone(), dep.req));
+            }
+        }
+    }
+    result.sort();
+    result.dedup();
+    Ok(result)
+}
+
+/// Транзитивные обратные зависимости среди установленных пакетов.
+fn reverse_deps_closure(db: &Database, target: &str) -> oparysh_db::DbResult<Vec<String>> {
+    let mut result = Vec::new();
+    let mut stack = vec![target.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(current) = stack.pop() {
+        for (dependent, _) in reverse_deps_installed(db, &current)? {
+            if seen.insert(dependent.clone()) {
+                result.push(dependent.clone());
+                stack.push(dependent);
+            }
+        }
+    }
+    result.sort();
+    Ok(result)
+}
+
+/// `oparysh deps [--tree] <pkg>`: показать зависимости пакета.
+fn run_deps(spec: &str, tree: bool) {
+    let config = load_config(None);
+    let specs = [spec.to_string()];
+    match resolve_cli(&specs, &[], &config, false, false) {
+        Ok((set, _)) => {
+            if tree {
+                let root = set
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| n.is_target)
+                    .map(|(name, _)| name.clone());
+                if let Some(root) = root {
+                    print_dep_tree(&set, &root);
+                }
+            } else {
+                println!("{name:<24} {version:<12} {kind:<10} REQUIRED BY", name="ИМЯ", version="ВЕРСИЯ", kind="ТИП");
+                for node in set.nodes.values().filter(|n| !n.is_target) {
+                    let kind = match (node.as_build, node.as_run) {
+                        (true, true) => "build/run",
+                        (true, false) => "build",
+                        (false, true) => "run",
+                        _ => "dependency",
+                    };
+                    let required_by = node.required_by.iter().filter_map(|(p, _)| p.as_deref()).collect::<Vec<_>>().join(", ");
+                    println!("{:<24} {:<12} {:<10} {}", node.name, node.version_str, kind, required_by);
+                }
+            }
+        }
+        Err(_) => {
+            // Репозиториев может не быть/пакета нет в индексе — покажем установленную БД.
+            let db = open_db(&config);
+            let installed = db.get_package(&split_pkg_spec(spec).0).ok().flatten();
+            let Some(pkg) = installed else {
+                std::process::exit(3);
+            };
+            println!("{} {} (installed; зависимости из БД)", pkg.name, pkg.version);
+            match db.get_deps(&pkg.name) {
+                Ok(deps) => {
+                    if tree {
+                        for dep in deps { println!("  {} {}", dep.dep_name, dep.req); }
+                    } else {
+                        for dep in deps { println!("{:<24} {:<12} {}", dep.dep_name, "", dep.req); }
+                    }
+                }
+                Err(e) => { eprintln!("ERROR: {e}"); std::process::exit(8); }
+            }
+        }
+    }
+}
+
+/// `oparysh rdeps <pkg>`: обратные зависимости среди установленных пакетов.
+fn run_rdeps(spec: &str) {
+    let config = load_config(None);
+    let db = open_db(&config);
+    let (name, _) = split_pkg_spec(spec);
+    match reverse_deps_installed(&db, &name) {
+        Ok(direct) => {
+            if direct.is_empty() {
+                println!("нет установленных пакетов, зависящих от {name}");
+                return;
+            }
+            println!("{name:<24} {req:<20} ЗАВИСИТ", name="ПАКЕТ", req="ТРЕБОВАНИЕ");
+            for (pkg, req) in direct {
+                println!("{:<24} {:<20} {}", pkg, req, name);
+            }
+        }
+        Err(e) => { eprintln!("ERROR: {e}"); std::process::exit(8); }
+    }
+}
+
+/// `oparysh why <pkg>`: объяснить, зачем пакет установлен.
+fn run_why(spec: &str) {
+    let config = load_config(None);
+    let db = open_db(&config);
+    let (name, _) = split_pkg_spec(spec);
+    let pkg = match db.get_package(&name) {
+        Ok(Some(pkg)) => pkg,
+        Ok(None) => {
+            eprintln!("ERROR: пакет {name} не установлен");
+            std::process::exit(3);
+        }
+        Err(e) => { eprintln!("ERROR: {e}"); std::process::exit(8); }
+    };
+    println!("{} {} установлен", pkg.name, pkg.version);
+    match reverse_deps_closure(&db, &name) {
+        Ok(users) if !users.is_empty() => {
+            println!("Нужен установленным пакетам:");
+            for user in users {
+                println!("  - {user}");
+            }
+        }
+        Ok(_) => {
+            println!("Ни один установленный пакет от него не зависит; вероятно, он установлен явно.");
+        }
+        Err(e) => { eprintln!("ERROR: {e}"); std::process::exit(8); }
     }
 }
 
@@ -407,6 +744,9 @@ fn run_repo_list() {
 #[derive(Parser)]
 #[command(name = "oparysh", version, about = "Source-based package manager")]
 struct Cli {
+    /// Не спрашивать подтверждение у команд, которые его поддерживают
+    #[arg(long, global = true)]
+    yes: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -460,6 +800,30 @@ enum Command {
         #[arg(long)]
         orphaned: bool,
     },
+    /// Показать план разрешения зависимостей и запросить подтверждение (stage 5.7)
+    Plan {
+        /// Цели: `pkg`, `pkg@ver`, необязательные зависимости через `+feature`
+        #[arg(value_name = "PKG", required = true)]
+        specs: Vec<String>,
+    },
+    /// Дерево или список зависимостей пакета (stage 5.8)
+    Deps {
+        /// Печатать дерево вместо плоского списка
+        #[arg(long)]
+        tree: bool,
+        /// Пакет в виде `pkg` или `pkg@ver`
+        pkg: String,
+    },
+    /// Обратные зависимости среди установленных пакетов (stage 5.8)
+    Rdeps {
+        /// Пакет в виде `pkg` или `pkg@ver`
+        pkg: String,
+    },
+    /// Объяснить, зачем установлен пакет (stage 5.8)
+    Why {
+        /// Пакет в виде `pkg` или `pkg@ver`
+        pkg: String,
+    },
     /// Управление репозиториями в конфиге (stage 4.5)
     Repo {
         #[command(subcommand)]
@@ -485,8 +849,25 @@ enum RepoCommand {
     },
 }
 
+/// Отделить фичи `+name` от целей в аргументах `oparysh plan`.
+fn split_plan_args(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut specs = Vec::new();
+    let mut features = Vec::new();
+    for arg in args {
+        if let Some(feature) = arg.strip_prefix('+') {
+            if !feature.is_empty() {
+                features.push(feature.to_string());
+            }
+        } else {
+            specs.push(arg.clone());
+        }
+    }
+    (specs, features)
+}
+
 fn main() {
     let cli = Cli::parse();
+    let assume_yes = cli.yes;
     match cli.command {
         Some(Command::Verify { tarball, expected }) => {
             if let Some(expected) = expected {
@@ -582,6 +963,17 @@ fn main() {
             outdated,
             orphaned,
         }) => run_list(installed, available, outdated, orphaned),
+        Some(Command::Plan { specs }) => {
+            let (specs, features) = split_plan_args(&specs);
+            if specs.is_empty() {
+                eprintln!("ERROR: укажите хотя бы один пакет");
+                std::process::exit(2);
+            }
+            run_plan(&specs, &features, assume_yes);
+        }
+        Some(Command::Deps { tree, pkg }) => run_deps(&pkg, tree),
+        Some(Command::Rdeps { pkg }) => run_rdeps(&pkg),
+        Some(Command::Why { pkg }) => run_why(&pkg),
         Some(Command::Repo { action }) => match action {
             RepoCommand::Add { name, target } => match run_repo_add(&name, &target) {
                 Ok(msg) => println!("{msg}"),
