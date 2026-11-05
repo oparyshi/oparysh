@@ -387,7 +387,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "oparysh-core",
  "oparysh-db",
+ "oparysh-repo",
  "oparysh-verifier",
 ]
 

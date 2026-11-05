@@ -41,3 +41,4 @@ libc = "0.2"
 oparysh-core = { path = "crates/oparysh-core" }
 oparysh-verifier = { path = "crates/oparysh-verifier" }
 oparysh-db = { path = "crates/oparysh-db" }
+oparysh-repo = { path = "crates/oparysh-repo" }

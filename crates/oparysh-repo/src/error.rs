@@ -26,6 +26,11 @@ pub enum RepoError {
     #[error("пакеты не найдены в индексе: {name}")]
     NameNotFound { name: String },
 
+    /// Репозиторий с таким именем не настроен — код **3** (категория
+    /// «не найдено», DOCS §11).
+    #[error("репозиторий не найден в [repositories]: {name}")]
+    RepoNotFound { name: String },
+
     #[error("нет файла рецепта для {name}:{version} (ожидался {path})")]
     RecipeMissing {
         name: String,

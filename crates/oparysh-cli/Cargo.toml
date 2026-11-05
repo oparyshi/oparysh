@@ -13,3 +13,5 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 oparysh-verifier = { workspace = true }
 oparysh-db = { workspace = true }
+oparysh-core = { workspace = true }
+oparysh-repo = { workspace = true }

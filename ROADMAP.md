@@ -55,7 +55,7 @@
 - [x] 4.1. Чтение локального репозитория-каталога: `index.toml` + `recipes/` + `dist/`
 - [x] 4.2. HTTP-клиент: скачивание `index.toml` в кэш (`/usr/local/oparysh/cache/repo/`)
 - [x] 4.3. Приоритет репозиториев из `[repositories]` (local > network, порядок в конфиге)
-- [ ] 4.4. Команда `oparysh sync [repo…]` (+ проверка `recipe_sha` после скачивания)
+- [x] 4.4. Команда `oparysh sync [repo…]` (+ проверка `recipe_sha` после скачивания)
 - [ ] 4.5. Команды `repo add / repo list / repo del` (правка конфига)
 - [ ] 4.6. Команда `oparysh search` (glob и `/regex/`) по имени/описанию/тегам
 - [ ] 4.7. Команды `oparysh info`, `oparysh list [--installed|--available|--outdated|--orphaned]`

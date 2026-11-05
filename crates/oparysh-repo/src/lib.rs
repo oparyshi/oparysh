@@ -34,6 +34,10 @@ mod priority;
 
 pub use priority::{RepoRef, RepoSet, RepoSource};
 
+mod sync;
+
+pub use sync::{open_synced, sync_repos, SyncKind, SyncOutcome};
+
 pub const INDEX_FILE: &str = "index.toml";
 pub const RECIPES_DIR: &str = "recipes";
 pub const DIST_DIR: &str = "dist";

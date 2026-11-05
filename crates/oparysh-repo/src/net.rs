@@ -15,10 +15,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 use oparysh_core::index::RepoIndex;
 
 use crate::error::{RepoError, RepoResult};
-use crate::INDEX_FILE;
+use crate::{INDEX_FILE, RECIPES_DIR, RECIPE_FILE};
 
 /// Имя подкаталога кэша с индексами сетевых репозиториев.
 pub const REPO_CACHE_DIR: &str = "repo";
@@ -94,6 +96,61 @@ impl NetworkRepo {
         fs::rename(&tmp, &dest)?;
 
         Ok((dest, index))
+    }
+
+    /// Скачивает рецепт `recipes/<name>/<ver>/pkg.toml` из сети в кэш
+    /// `<cache>/repo/<name>/recipes/…` и **проверяет `recipe_sha`** по
+    /// индексу (DOCS §9, строка «файл рецепта … oparysh sync, при загрузке
+    /// из сети»): несовпадение хэша — [`RepoError::RecipeShaMismatch`],
+    /// код возврата **6**.
+    ///
+    /// Атомарно, как `fetch_index`: сначала файл `.part`, затем rename.
+    /// Индекс — уже скачанный ранее ([`NetworkRepo::fetch_index`] или
+    /// [`CachedRepo`]), он задаёт ожидаемый `recipe_sha`.
+    pub fn fetch_recipe(
+        &self,
+        cache_dir: &Path,
+        index: &RepoIndex,
+        name: &str,
+        version: &str,
+    ) -> RepoResult<PathBuf> {
+        let pkg = index
+            .pkg
+            .iter()
+            .find(|p| p.name == name && p.version == version)
+            .ok_or(RepoError::PkgNotFound {
+                name: name.to_string(),
+                version: version.to_string(),
+            })?;
+
+        let url = format!("{}/{}/{}/{}/{}", self.url, RECIPES_DIR, name, version, RECIPE_FILE);
+        let raw = self.download(&url)?;
+        let raw = String::from_utf8_lossy(&raw).into_owned();
+
+        // Хэш скачанного — до записи в кэш: битый файл не выглядит как
+        // готовый рецепт.
+        let mut hasher = Sha256::new();
+        hasher.update(raw.as_bytes());
+        let actual = hex::encode(hasher.finalize());
+        if !actual.eq_ignore_ascii_case(&pkg.recipe_sha) {
+            return Err(RepoError::RecipeShaMismatch {
+                path: url.clone(),
+                expected: pkg.recipe_sha.clone(),
+                actual,
+            });
+        }
+
+        let dest_dir = repo_cache_dir(cache_dir)
+            .join(&index.repo.name)
+            .join(RECIPES_DIR)
+            .join(name)
+            .join(version);
+        let dest = dest_dir.join(RECIPE_FILE);
+        let tmp = dest_dir.join(format!("{RECIPE_FILE}.{PART_EXT}"));
+        fs::create_dir_all(&dest_dir)?;
+        fs::write(&tmp, raw.as_bytes())?;
+        fs::rename(&tmp, &dest)?;
+        Ok(dest)
     }
 
     /// Открыть репозиторий из кэша, если он уже скачан (как [`LocalRepo`], но
@@ -332,6 +389,75 @@ mod tests {
         // Путь-траверс в имени репозитория отклоняется.
         let err2 = CachedRepo::open(&cache, "../traversal").unwrap_err();
         assert!(matches!(err2, RepoError::BadRepoName { .. }), "{err2}");
+        fs::remove_dir_all(cache.parent().unwrap()).unwrap();
+    }
+
+    /// Тело index.toml + sha256 скачанного рецепта hello-1.0 (для fetch_recipe).
+    mod recipe_fixture {
+        use sha2::{Digest, Sha256};
+
+        pub const RECIPE: &[u8] = b"[pkg]\nname = \"hello\"\nversion = \"1.0\"\n";
+
+        pub fn recipe_sha() -> String {
+            let mut hasher = Sha256::new();
+            hasher.update(RECIPE);
+            hex::encode(hasher.finalize())
+        }
+
+        pub fn index_body() -> String {
+            format!(
+                "[repo]\nname = \"stable\"\n\n[[pkg]]\nname = \"hello\"\nversion = \"1.0\"\n\
+                 recipe_sha = \"{}\"\nsrc_sha256 = \"b04a\"\n",
+                recipe_sha()
+            )
+        }
+    }
+
+    #[test]
+    fn fetch_recipe_ok_and_mismatch() {
+        let cache = cache_dir().join("cache");
+        let index =
+            oparysh_core::index::RepoIndex::parse(&recipe_fixture::index_body()).unwrap();
+
+        // Сервер отдаёт скачанный рецепт — тот же файл, что в index.toml.
+        let (addr, server) =
+            spawn_server(http_response("200 OK", recipe_fixture::RECIPE));
+        let repo = NetworkRepo::new(format!("http://{addr}"));
+        let path = repo.fetch_recipe(&cache, &index, "hello", "1.0").unwrap();
+        server.join().unwrap();
+
+        let expected = repo_cache_dir(&cache)
+            .join("stable")
+            .join(RECIPES_DIR)
+            .join("hello")
+            .join("1.0")
+            .join(RECIPE_FILE);
+        assert_eq!(path, expected);
+        assert!(path.is_file());
+        assert!(!dest_part(&path).exists());
+
+        // Сервер отдаёт **подменённый** рецепт — sha не совпадает, код **6**,
+        // кэш не пишется поверх корректного.
+        fs::remove_dir_all(&cache).unwrap();
+        let (addr2, server2) =
+            spawn_server(http_response("200 OK", b"[pkg]\nname = \"evil\"\n"));
+        let repo2 = NetworkRepo::new(format!("http://{addr2}"));
+        let err = repo2
+            .fetch_recipe(&cache, &index, "hello", "1.0")
+            .unwrap_err();
+        server2.join().unwrap();
+        assert!(
+            matches!(err, RepoError::RecipeShaMismatch { .. }),
+            "{err}"
+        );
+        assert!(!expected.exists());
+
+        // Пакета нет в индексе — PkgNotFound (код 3).
+        let err2 = repo2
+            .fetch_recipe(&cache, &index, "x", "9.9")
+            .unwrap_err();
+        assert!(matches!(err2, RepoError::PkgNotFound { .. }), "{err2}");
+
         fs::remove_dir_all(cache.parent().unwrap()).unwrap();
     }
 }
