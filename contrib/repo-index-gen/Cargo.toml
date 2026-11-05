@@ -1,0 +1,11 @@
+[package]
+name = "oparysh-repo-index-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Генератор index.toml по каталогу рецептов oparysh (основа `oparysh repo gen-index`)"
+
+[dependencies]
+oparysh-repo = { path = "../../crates/oparysh-repo" }
+anyhow.workspace = true
+clap.workspace = true

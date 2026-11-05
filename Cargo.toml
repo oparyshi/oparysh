@@ -10,6 +10,7 @@ members = [
     "crates/oparysh-installer",
     "crates/oparysh-db",
     "crates/oparysh-repo",
+    "contrib/repo-index-gen",
 ]
 
 [workspace.package]

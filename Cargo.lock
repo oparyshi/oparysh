@@ -460,6 +460,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oparysh-repo-index-gen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "oparysh-repo",
+]
+
+[[package]]
 name = "oparysh-resolver"
 version = "0.1.0"
 dependencies = [

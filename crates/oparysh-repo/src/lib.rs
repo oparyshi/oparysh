@@ -42,6 +42,10 @@ mod search;
 
 pub use search::{search_repos, SearchHit, SearchOutcome, SearchPattern};
 
+mod genindex;
+
+pub use genindex::{generate_index, render_index, write_index, GenIndexError, GenIndexOptions};
+
 mod query;
 
 pub use query::{
