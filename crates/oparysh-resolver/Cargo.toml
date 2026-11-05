@@ -5,5 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+oparysh-core = { workspace = true }
+oparysh-repo = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

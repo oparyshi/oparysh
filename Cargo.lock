@@ -472,7 +472,11 @@ dependencies = [
 name = "oparysh-resolver"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "oparysh-core",
+ "oparysh-repo",
  "serde",
+ "sha2",
  "thiserror",
 ]
 
