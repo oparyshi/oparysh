@@ -52,3 +52,4 @@ oparysh-db = { path = "crates/oparysh-db" }
 oparysh-repo = { path = "crates/oparysh-repo" }
 oparysh-resolver = { path = "crates/oparysh-resolver" }
 oparysh-fetcher = { path = "crates/oparysh-fetcher" }
+oparysh-builder = { path = "crates/oparysh-builder" }

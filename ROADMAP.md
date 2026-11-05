@@ -86,11 +86,11 @@
 - [x] 6.6. Команда `oparysh clean [--src|--build|--logs|--all]`
 - [x] 6.7. Тесты: кэш-хит, кэш-мисс, битый хэш
 
-## Этап 7. Builder (сборка) ☐
+## Этап 7. Builder (сборка) ◐
 **нужно:** этап 1, 6
 
-- [ ] 7.1. Вычисление финальных флагов (раздел 6): `CFLAGS = profile + build.extra + recipe.build.cflags`, `MAKEOPTS = -j{jobs} + …`, приоритет `cc`: config → recipe
-- [ ] 7.2. Подстановки `${OPARYSH_PREFIX}` и др. в шагах
+- [x] 7.1. Вычисление финальных флагов (раздел 6): `CFLAGS = profile + build.extra + recipe.build.cflags`, `MAKEOPTS = -j{jobs} + …`, приоритет `cc`: config → recipe
+- [x] 7.2. Подстановки `${OPARYSH_PREFIX}` и др. в шагах
 - [ ] 7.3. Сборочные системы: `autoconf-make`, затем `make-only`, `custom` (через `[build.steps]`)
 - [ ] 7.4. Сборочные системы: `cmake-ninja`, `cargo`, `meson`
 - [ ] 7.5. Суженное окружение процесса: фиксированный `PATH`, `CC/CXX/CPP/CFLAGS/…` только из профиля;_env из `env = {}`

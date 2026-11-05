@@ -8,3 +8,8 @@ license.workspace = true
 serde = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
+oparysh-core = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+oparysh-core = { workspace = true }

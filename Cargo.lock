@@ -452,7 +452,9 @@ name = "oparysh-builder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "oparysh-core",
  "serde",
+ "thiserror",
  "toml",
 ]
 
