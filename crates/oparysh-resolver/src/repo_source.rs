@@ -65,6 +65,47 @@ impl PackageSource for RepoPackageSource {
         Ok(out)
     }
 
+    fn providers(&self, virtual_name: &str) -> ResolveResult<Vec<Candidate>> {
+        let mut out = Vec::new();
+        for r in self.set.refs() {
+            let packages: Vec<oparysh_core::index::RepoPkg> = match &r.source {
+                RepoSource::Local(root) => LocalRepo::open(root)?.packages().to_vec(),
+                RepoSource::Network(_) => match CachedRepo::open(&self.cache_dir, &r.name) {
+                    Ok(c) => c.index.pkg.clone(),
+                    Err(_) => continue,
+                },
+            };
+            for p in &packages {
+                // Читаем рецепт (с проверкой хэша) и смотрим provides.virtual.
+                let recipe = match self.recipe(&Candidate {
+                    name: p.name.clone(),
+                    version: Version::parse(&p.version)?,
+                    version_str: p.version.clone(),
+                    build: p.build,
+                    repo: r.name.clone(),
+                }) {
+                    Ok(r) => r,
+                    Err(_) => continue, // рецепт без хэша/битый пропускаем
+                };
+                if recipe
+                    .provides
+                    .r#virtual
+                    .iter()
+                    .any(|v| v == virtual_name)
+                {
+                    out.push(Candidate {
+                        name: p.name.clone(),
+                        version: Version::parse(&p.version)?,
+                        version_str: p.version.clone(),
+                        build: p.build,
+                        repo: r.name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn recipe(&self, candidate: &Candidate) -> ResolveResult<Recipe> {
         let ver = &candidate.version_str;
         let raw = match self.source_of(&candidate.repo) {

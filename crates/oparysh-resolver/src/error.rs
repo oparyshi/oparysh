@@ -40,6 +40,25 @@ pub enum ResolveError {
         selected: String,
         required: String,
     },
+
+    /// Конфликт с `conflicts` другого пакета — код **4**.
+    #[error("конфликт пакетов: {pkg} конфликтует с {conflicting} ({req})")]
+    Conflict {
+        pkg: String,
+        conflicting: String,
+        req: String,
+    },
+
+    /// Цикл по `deps.build` — код **4** (runtime-цикл разрешён).
+    #[error("цикл build-зависимостей: {path}")]
+    BuildCycle { path: String },
+
+    /// Несколько пакетов предоставляют виртуальное имя — нужен выбор.
+    #[error("неоднозначный поставщик виртуального пакета {virtual_name}: {}", providers.join(", "))]
+    AmbiguousProvider {
+        virtual_name: String,
+        providers: Vec<String>,
+    },
 }
 
 /// Специализированный Result для oparysh-resolver.

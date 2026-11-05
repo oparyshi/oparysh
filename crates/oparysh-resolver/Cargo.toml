@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 oparysh-core = { workspace = true }
 oparysh-repo = { workspace = true }
+oparysh-db = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }

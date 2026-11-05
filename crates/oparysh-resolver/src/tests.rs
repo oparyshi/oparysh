@@ -73,6 +73,25 @@ impl PackageSource for FakeSource {
             message,
         })
     }
+
+    fn providers(&self, virtual_name: &str) -> crate::ResolveResult<Vec<Candidate>> {
+        let mut out = Vec::new();
+        for (name, entries) in &self.pkgs {
+            for (v, repo, toml) in entries {
+                let parsed = Recipe::parse(toml).unwrap();
+                if parsed.provides.r#virtual.iter().any(|p| p == virtual_name) {
+                    out.push(Candidate {
+                        name: name.clone(),
+                        version: oparysh_core::version::Version::parse(v).unwrap(),
+                        version_str: v.clone(),
+                        build: 1,
+                        repo: repo.clone(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn req(s: &str) -> DepReq {
@@ -286,4 +305,334 @@ fn repo_package_source_reads_local_repo() {
     assert_eq!(set.nodes["lib"].repo, "test");
 
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+// ---------- Этапы 5.2–5.6 ----------
+
+use crate::collect::{resolve, ResolveOptions};
+use crate::installed::{InstalledPkg, InstalledSource};
+use crate::plan::{build_order, pending_build_order};
+use oparysh_core::version::Version;
+
+/// Поддельный источник установленных пакетов.
+#[derive(Default)]
+struct FakeInstalled {
+    pkgs: BTreeMap<String, (String, u32)>, // name -> (version, build_rev)
+}
+
+impl FakeInstalled {
+    fn add(&mut self, name: &str, version: &str) {
+        self.pkgs.insert(name.to_string(), (version.to_string(), 1));
+    }
+}
+
+impl InstalledSource for FakeInstalled {
+    fn installed(&self, name: &str) -> Option<InstalledPkg> {
+        self.pkgs.get(name).map(|(v, b)| InstalledPkg {
+            name: name.to_string(),
+            version: Version::parse(v).unwrap(),
+            version_str: v.clone(),
+            build_rev: *b,
+        })
+    }
+}
+
+fn recipe_provides(name: &str, version: &str, provides: &str, deps: &str) -> String {
+    format!(
+        "[pkg]\nname = \"{name}\"\nversion = \"{version}\"\n\n[provides]\nvirtual = [{provides}]\n\n[deps]\n{deps}\n\n[build]\nsystem = \"make-only\"\n"
+    )
+}
+
+fn recipe_conflicts(name: &str, version: &str, conflicts: &str, deps: &str) -> String {
+    format!(
+        "[pkg]\nname = \"{name}\"\nversion = \"{version}\"\n\n[conflicts]\npkgs = [{conflicts}]\n\n[deps]\n{deps}\n\n[build]\nsystem = \"make-only\"\n"
+    )
+}
+
+// 5.2: установленный пакет, удовлетворяющий требованию → узел «уже выполнено».
+#[test]
+fn installed_satisfying_req_is_marked_done() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"b>=1.0\"]"));
+    src.add("b", "2.0", &recipe("b", "2.0", "run = [\"c\"]"));
+    src.add("c", "1.0", &recipe("c", "1.0", ""));
+
+    let mut installed = FakeInstalled::default();
+    installed.add("b", "1.5");
+
+    let set = resolve(
+        &[req("a")],
+        &src,
+        &ResolveOptions {
+            installed: Some(&installed),
+            ..ResolveOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(set.nodes["b"].installed);
+    assert_eq!(set.nodes["b"].version_str, "1.5");
+    // Зависимости установленного пакета не раскрываются.
+    assert!(!set.nodes.contains_key("c"));
+}
+
+// 5.2: установленный НЕ удовлетворяет требованию → берётся из репо.
+#[test]
+fn installed_not_satisfying_falls_back_to_repo() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"b>=2.0\"]"));
+    src.add("b", "2.0", &recipe("b", "2.0", ""));
+
+    let mut installed = FakeInstalled::default();
+    installed.add("b", "1.0");
+
+    let set = resolve(
+        &[req("a")],
+        &src,
+        &ResolveOptions {
+            installed: Some(&installed),
+            ..ResolveOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(!set.nodes["b"].installed);
+    assert_eq!(set.nodes["b"].version_str, "2.0");
+}
+
+// 5.3: строатегия latest-satisfying (покрыта и старыми тестами) + repo priority.
+#[test]
+fn latest_satisfying_prefers_highest_build_rev() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"b>=1.0\"]"));
+    // Две записи одной версии из одного репо — разные build-ревизии.
+    src.pkgs.entry("b".to_string()).or_default().push((
+        "1.0".to_string(),
+        "test".to_string(),
+        recipe("b", "1.0", ""),
+    ));
+
+    let set = collect_requirements(&[req("a")], &src, &[]).unwrap();
+    assert_eq!(set.nodes["b"].version_str, "1.0");
+}
+
+// 5.4: виртуальный пакет с единственным поставщиком.
+#[test]
+fn virtual_package_single_provider() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"sh\"]"));
+    src.add(
+        "bash",
+        "5.2",
+        &recipe_provides("bash", "5.2", "\"sh\"", ""),
+    );
+
+    let set = collect_requirements(&[req("a")], &src, &[]).unwrap();
+    assert!(set.nodes.contains_key("bash"));
+    assert_eq!(set.nodes["bash"].provided_for.as_deref(), Some("sh"));
+}
+
+// 5.4: несколько поставщиков → неоднозначность (CLI спросит интерактивно).
+#[test]
+fn virtual_package_ambiguous_providers_error() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"sh\"]"));
+    src.add(
+        "bash",
+        "5.2",
+        &recipe_provides("bash", "5.2", "\"sh\"", ""),
+    );
+    src.add(
+        "dash",
+        "0.5",
+        &recipe_provides("dash", "0.5", "\"sh\"", ""),
+    );
+
+    let err = collect_requirements(&[req("a")], &src, &[]).unwrap_err();
+    assert!(matches!(
+        err,
+        ResolveError::AmbiguousProvider { ref virtual_name, ref providers }
+            if virtual_name == "sh" && providers == &vec!["bash".to_string(), "dash".to_string()]
+    ));
+}
+
+// 5.4: выбор поставщика через опцию provider.
+#[test]
+fn virtual_package_provider_choice() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"sh\"]"));
+    src.add(
+        "bash",
+        "5.2",
+        &recipe_provides("bash", "5.2", "\"sh\"", ""),
+    );
+    src.add(
+        "dash",
+        "0.5",
+        &recipe_provides("dash", "0.5", "\"sh\"", ""),
+    );
+
+    let set = resolve(
+        &[req("a")],
+        &src,
+        &ResolveOptions {
+            provider: Some("dash".to_string()),
+            ..ResolveOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(set.nodes.contains_key("dash"));
+    assert!(!set.nodes.contains_key("bash"));
+}
+
+// 5.4: установленный поставщик предпочтительнее для виртуального пакета.
+#[test]
+fn virtual_package_prefers_installed_provider() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"sh\"]"));
+    src.add(
+        "bash",
+        "5.2",
+        &recipe_provides("bash", "5.2", "\"sh\"", ""),
+    );
+    src.add(
+        "dash",
+        "0.5",
+        &recipe_provides("dash", "0.5", "\"sh\"", ""),
+    );
+
+    let mut installed = FakeInstalled::default();
+    installed.add("dash", "0.5");
+
+    let set = resolve(
+        &[req("a")],
+        &src,
+        &ResolveOptions {
+            installed: Some(&installed),
+            ..ResolveOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(set.nodes.contains_key("dash"));
+    assert!(set.nodes["dash"].installed);
+}
+
+// 5.5: конфликт между двумя выбранными пакетами.
+#[test]
+fn conflicts_between_selected_packages() {
+    let mut src = FakeSource::default();
+    src.add(
+        "a",
+        "1.0",
+        &recipe_conflicts("a", "1.0", "\"b>=1.0\"", "run = [\"b\"]"),
+    );
+    src.add("b", "1.0", &recipe("b", "1.0", ""));
+
+    let err = collect_requirements(&[req("a")], &src, &[]).unwrap_err();
+    assert!(matches!(
+        err,
+        ResolveError::Conflict { ref pkg, ref conflicting, .. }
+            if pkg == "a" && conflicting == "b"
+    ));
+}
+
+// 5.5: конфликт с установленным пакетом (не входящим в план).
+#[test]
+fn conflicts_with_installed_package() {
+    let mut src = FakeSource::default();
+    src.add(
+        "a",
+        "1.0",
+        &recipe_conflicts("a", "1.0", "\"oldlib>=2.0\"", ""),
+    );
+
+    let mut installed = FakeInstalled::default();
+    installed.add("oldlib", "2.1");
+
+    let err = resolve(
+        &[req("a")],
+        &src,
+        &ResolveOptions {
+            installed: Some(&installed),
+            ..ResolveOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ResolveError::Conflict { ref conflicting, .. } if conflicting == "oldlib"
+    ));
+}
+
+// 5.5: build-цикл → ошибка BuildCycle.
+#[test]
+fn build_cycle_is_error() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "build = [\"b\"]"));
+    src.add("b", "1.0", &recipe("b", "1.0", "build = [\"a\"]"));
+
+    let err = collect_requirements(&[req("a")], &src, &[]).unwrap_err();
+    assert!(matches!(err, ResolveError::BuildCycle { .. }));
+}
+
+// 5.5: runtime-цикл разрешён (и сборка завершается).
+#[test]
+fn runtime_cycle_allowed() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"b\"]"));
+    src.add("b", "1.0", &recipe("b", "1.0", "run = [\"a\"]"));
+
+    let set = collect_requirements(&[req("a")], &src, &[]).unwrap();
+    assert_eq!(set.nodes.len(), 2);
+}
+
+// 5.6: топологическая сортировка — зависимости раньше зависящих.
+#[test]
+fn topo_order_deps_first() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"b\"]"));
+    src.add("b", "1.0", &recipe("b", "1.0", "run = [\"c\"]"));
+    src.add("c", "1.0", &recipe("c", "1.0", ""));
+
+    let set = collect_requirements(&[req("a")], &src, &[]).unwrap();
+    let order = build_order(&set);
+    let pos = |n: &str| order.iter().position(|x| x == n).unwrap();
+    assert!(pos("c") < pos("b"));
+    assert!(pos("b") < pos("a"));
+}
+
+// 5.6: pending_build_order исключает установленные узлы.
+#[test]
+fn pending_order_skips_installed() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"b\"]"));
+    src.add("b", "1.0", &recipe("b", "1.0", ""));
+
+    let mut installed = FakeInstalled::default();
+    installed.add("b", "1.0");
+
+    let set = resolve(
+        &[req("a")],
+        &src,
+        &ResolveOptions {
+            installed: Some(&installed),
+            ..ResolveOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(pending_build_order(&set), vec!["a".to_string()]);
+    // Полный порядок содержит и установленный узел.
+    assert_eq!(build_order(&set).len(), 2);
+}
+
+// 5.6: runtime-цикл не ломает топологическую сортировку.
+#[test]
+fn topo_order_tolerates_runtime_cycle() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"b\", \"c\"]"));
+    src.add("b", "1.0", &recipe("b", "1.0", "run = [\"a\"]"));
+    src.add("c", "1.0", &recipe("c", "1.0", ""));
+
+    let set = collect_requirements(&[req("a")], &src, &[]).unwrap();
+    let order = build_order(&set);
+    assert_eq!(order.len(), 3);
+    assert!(order.iter().position(|n| n == "c").unwrap() < order.iter().position(|n| n == "a").unwrap());
 }

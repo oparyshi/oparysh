@@ -1,20 +1,23 @@
-//! Сбор требований (этап 5.1 ROADMAP, DOCS §7 п.1).
+//! Сбор требований (этап 5 ROADMAP, DOCS §7 п.1–5).
 //!
 //! Начинаем с целей (`oparysh install nginx pcre2>=10.32`) и рекурсивно
 //! раскрываем `deps.build` (нужны только при сборке) и `deps.run` (нужны
 //! в рантайме). Опциональные зависимости (`deps.optional`) включаются,
 //! если включена соответствующая фича (`oparysh install nginx +tls`).
 //!
-//! Версия каждого пакета выбирается стратегией **latest-satisfying**:
-//! кандидаты берутся со всех включённых репозиториев в порядке приоритета
-//! конфига; в первом репозитории, где есть подходящая версия, выбирается
-//! максимальная (приоритет репозитория важнее свежести версии в другом
-//! репозитории — DOCS §7 п.3). Более тонкая настройка — этап 5.3.
+//! - **5.2** — если установленный пакет удовлетворяет требованию, узел
+//!   помечается `installed = true` и его зависимости не раскрываются;
+//! - **5.3** — стратегия `latest-satisfying`: первый по приоритету
+//!   репозиторий, в котором есть подходящая версия; внутри него —
+//!   максимальная версия (в т.ч. `build`-ревизия);
+//! - **5.4** — если пакета с запрошенным именем нет, выполняется поиск
+//!   поставщика по `provides.virtual`; при нескольких поставщиках выбирается
+//!   установленный, иначе — `options.provider`, иначе ошибка
+//!   [`ResolveError::AmbiguousProvider`] (CLI предлагает выбор интерактивно);
+//! - **5.5** — проверка `conflicts` и обнаружение циклов: runtime-цикл
+//!   разрешён, build-цикл — ошибка [`ResolveError::BuildCycle`].
 //!
-//! Учёт уже установленных пакетов — этап 5.2, виртуальные пакеты/`provides`
-//! — этап 5.4, обнаружение циклов и проверка `conflicts` — этап 5.5.
-//! Здесь рекурсия просто **завершается** за счёт множества посещённых
-//! узлов; рёбра цикла фиксируются как обычные зависимости.
+//! Топологическая сортировка — в [`crate::plan`] (этап 5.6).
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -22,6 +25,7 @@ use oparysh_core::recipe::Recipe;
 use oparysh_core::version::{DepReq, Version};
 
 use crate::error::{ResolveError, ResolveResult};
+use crate::installed::InstalledSource;
 
 /// Тип зависимости по секции рецепта.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -67,6 +71,23 @@ pub trait PackageSource {
     fn candidates(&self, name: &str) -> ResolveResult<Vec<Candidate>>;
     /// Рецепт конкретного кандидата (проверки хэшей — на стороне реализации).
     fn recipe(&self, candidate: &Candidate) -> ResolveResult<Recipe>;
+    /// Кандидаты-поставщики виртуального пакета (`provides.virtual`).
+    /// По умолчанию — пусто.
+    fn providers(&self, _virtual_name: &str) -> ResolveResult<Vec<Candidate>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Опции разрешения зависимостей.
+#[derive(Default)]
+pub struct ResolveOptions<'a> {
+    /// Включённые фичи (`oparysh install nginx +tls`).
+    pub features: Vec<String>,
+    /// Источник сведений об установленных пакетах (этап 5.2). Без него
+    /// установленные пакеты не учитываются.
+    pub installed: Option<&'a dyn InstalledSource>,
+    /// Предпочтительный поставщик виртуального пакета (выбор пользователя).
+    pub provider: Option<String>,
 }
 
 /// Ребро графа зависимостей.
@@ -99,8 +120,17 @@ pub struct CollectedNode {
     pub as_run: bool,
     /// Пакет является целью из командной строки.
     pub is_target: bool,
+    /// Пакет уже установлен и удовлетворяет требованию (этап 5.2):
+    /// узел «уже выполнено», пересобирать не нужно.
+    pub installed: bool,
+    /// Узел выбран как поставщик виртуального пакета с этим именем (этап 5.4).
+    pub provided_for: Option<String>,
     /// Кто и как требует этот пакет (отсортировано, без дубликатов).
     pub required_by: Vec<(Option<String>, DepKind)>,
+    /// Имена узлов, от которых узел зависит (в порядке обнаружения).
+    pub dependencies: Vec<String>,
+    /// Разобранные `conflicts.pkgs` рецепта (этап 5.5).
+    pub conflicts: Vec<DepReq>,
 }
 
 impl CollectedNode {
@@ -114,7 +144,11 @@ impl CollectedNode {
             as_build: false,
             as_run: false,
             is_target,
+            installed: false,
+            provided_for: None,
             required_by: Vec::new(),
+            dependencies: Vec::new(),
+            conflicts: Vec::new(),
         }
     }
 }
@@ -133,6 +167,11 @@ impl RequirementSet {
     pub fn build_only(&self) -> impl Iterator<Item = &CollectedNode> {
         self.nodes.values().filter(|n| n.as_build && !n.as_run)
     }
+
+    /// Узлы, которые нужно собрать/установить (не `installed`).
+    pub fn pending(&self) -> impl Iterator<Item = &CollectedNode> {
+        self.nodes.values().filter(|n| !n.installed)
+    }
 }
 
 /// Разобрать сырую зависимость из рецепта/индекса.
@@ -146,8 +185,11 @@ fn parse_dep(raw: &str, context: &str) -> ResolveResult<DepReq> {
 
 /// Выбрать кандидата по требованию: первый по приоритету репозиторий,
 /// в котором есть подходящая версия; внутри репозитория — максимальная
-/// (`latest-satisfying`).
-fn select<'a>(candidates: &'a [Candidate], req: &DepReq) -> Option<&'a Candidate> {
+/// (`latest-satisfying`, этап 5.3).
+pub fn select_latest_satisfying<'a>(
+    candidates: &'a [Candidate],
+    req: &DepReq,
+) -> Option<&'a Candidate> {
     let mut seen_repos: Vec<&str> = Vec::new();
     for c in candidates {
         if !seen_repos.contains(&c.repo.as_str()) {
@@ -169,21 +211,29 @@ fn select<'a>(candidates: &'a [Candidate], req: &DepReq) -> Option<&'a Candidate
 }
 
 /// Собрать требования: рекурсивно раскрыть `deps.build` и `deps.run`
-/// начиная с `targets`.
-///
-/// `features` — включённые фичи (`oparysh install nginx +tls`); включают
-/// соответствующие `deps.optional`.
-///
-/// Ошибки: [`ResolveError::Unresolved`] — нет кандидата, удовлетворяющего
-/// требованию; [`ResolveError::VersionConflict`] — ранее выбранная версия
-/// не удовлетворяет новому требованию; ошибки источника — как есть.
+/// начиная с `targets`. Обёртка над [`resolve`] с опциями по умолчанию.
 pub fn collect_requirements(
     targets: &[DepReq],
     source: &dyn PackageSource,
     features: &[String],
 ) -> ResolveResult<RequirementSet> {
+    resolve(
+        targets,
+        source,
+        &ResolveOptions {
+            features: features.to_vec(),
+            ..ResolveOptions::default()
+        },
+    )
+}
+
+/// Полное разрешение зависимостей с опциями (этапы 5.2–5.5).
+pub fn resolve(
+    targets: &[DepReq],
+    source: &dyn PackageSource,
+    options: &ResolveOptions<'_>,
+) -> ResolveResult<RequirementSet> {
     let mut result = RequirementSet::default();
-    // name -> индекс в порядке вставки не нужен; BTreeMap достаточен.
     let mut queue: VecDeque<(DepReq, DepKind, Option<String>)> = VecDeque::new();
 
     for target in targets {
@@ -191,15 +241,16 @@ pub fn collect_requirements(
     }
 
     while let Some((req, kind, parent)) = queue.pop_front() {
-        let edge = DepEdge {
+        result.edges.push(DepEdge {
             from: parent.clone(),
             req: req.clone(),
             kind,
-        };
-        result.edges.push(edge);
+        });
 
-        let candidates = source.candidates(&req.name)?;
-        if let Some(existing) = result.nodes.get_mut(&req.name) {
+        // 5.4: поставщик виртуального пакета, если пакета с таким именем нет.
+        let (node_name, provided_for) = resolve_name(&req, source, options)?;
+
+        if let Some(existing) = result.nodes.get_mut(&node_name) {
             // Узел уже выбран — версия обязана удовлетворять новому требованию.
             let ok = req
                 .req
@@ -207,42 +258,87 @@ pub fn collect_requirements(
                 .map_or(true, |r| existing.version.satisfies(r));
             if !ok {
                 return Err(ResolveError::VersionConflict {
-                    name: req.name.clone(),
+                    name: node_name.clone(),
                     selected: existing.version.to_string(),
                     required: req.to_string(),
                 });
             }
             merge_edge(existing, kind, parent.as_deref());
+            push_dependency(&mut result.nodes, parent.as_deref(), &node_name);
             continue;
         }
 
+        // 5.2: установленный пакет, удовлетворяющий требованию.
+        if let Some(installed) = options.installed.and_then(|i| i.installed(&node_name)) {
+            let ok = req
+                .req
+                .as_ref()
+                .map_or(true, |r| installed.version.satisfies(r));
+            if ok {
+                let is_target = parent.is_none();
+                let mut node = CollectedNode {
+                    name: installed.name.clone(),
+                    version: installed.version,
+                    version_str: installed.version_str,
+                    build: installed.build_rev,
+                    repo: String::new(),
+                    as_build: false,
+                    as_run: false,
+                    is_target,
+                    installed: true,
+                    provided_for,
+                    required_by: Vec::new(),
+                    dependencies: Vec::new(),
+                    conflicts: Vec::new(),
+                };
+                merge_edge(&mut node, kind, parent.as_deref());
+                result.nodes.insert(installed.name, node);
+                push_dependency(&mut result.nodes, parent.as_deref(), &node_name);
+                continue;
+            }
+        }
+
+        let candidates = source.candidates(&node_name)?;
         if candidates.is_empty() {
             return Err(ResolveError::Unresolved {
                 req: req.to_string(),
                 reason: "пакет не найден ни в одном репозитории".to_string(),
             });
         }
-        let selected = select(&candidates, &req).ok_or_else(|| ResolveError::Unresolved {
-            req: req.to_string(),
-            reason: format!(
-                "нет версии, удовлетворяющей требованию (доступны: {})",
-                candidates
-                    .iter()
-                    .map(|c| c.version.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+        let selected = select_latest_satisfying(&candidates, &req).ok_or_else(|| {
+            ResolveError::Unresolved {
+                req: req.to_string(),
+                reason: format!(
+                    "нет версии, удовлетворяющей требованию (доступны: {})",
+                    candidates
+                        .iter()
+                        .map(|c| c.version.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
         })?;
 
         let is_target = parent.is_none();
         let mut node = CollectedNode::new(selected.clone(), is_target);
+        node.provided_for = provided_for;
         merge_edge(&mut node, kind, parent.as_deref());
         let name = node.name.clone();
         result.nodes.insert(name.clone(), node);
+        push_dependency(&mut result.nodes, parent.as_deref(), &name);
 
         // Раскрываем зависимости выбранного рецепта.
         let recipe = source.recipe(selected)?;
         let context = format!("{name} {}", selected.version_str);
+        // 5.5: собираем конфликты для последующей проверки.
+        let conflicts = recipe
+            .conflicts
+            .pkgs
+            .iter()
+            .map(|raw| parse_dep(raw, &context))
+            .collect::<ResolveResult<Vec<_>>>()?;
+        result.nodes.get_mut(&name).expect("узел вставлен").conflicts = conflicts;
+
         for raw in &recipe.deps.build {
             let dep = parse_dep(raw, &context)?;
             queue.push_back((dep, DepKind::Build, Some(name.clone())));
@@ -252,7 +348,7 @@ pub fn collect_requirements(
             queue.push_back((dep, DepKind::Run, Some(name.clone())));
         }
         for (raw, feature) in &recipe.deps.optional {
-            if features.iter().any(|f| f == feature) {
+            if options.features.iter().any(|f| f == feature) {
                 let dep = parse_dep(raw, &context)?;
                 queue.push_back((dep, DepKind::Run, Some(name.clone())));
             }
@@ -265,7 +361,90 @@ pub fn collect_requirements(
         node.required_by.dedup();
     }
 
+    // 5.5: проверка conflicts.
+    check_conflicts(&result, options.installed)?;
+    // 5.5: build-цикл — ошибка (runtime-цикл разрешён).
+    check_build_cycles(&result)?;
+
     Ok(result)
+}
+
+/// Определить имя узла для требования: само имя, либо поставщик виртуального
+/// пакета (этап 5.4). Возвращает (имя узла, имя виртуального пакета).
+fn resolve_name(
+    req: &DepReq,
+    source: &dyn PackageSource,
+    options: &ResolveOptions<'_>,
+) -> ResolveResult<(String, Option<String>)> {
+    // Явный пакет существует?
+    if !source.candidates(&req.name)?.is_empty() {
+        return Ok((req.name.clone(), None));
+    }
+    // Может, установлен?
+    if options
+        .installed
+        .and_then(|i| i.installed(&req.name))
+        .is_some()
+    {
+        return Ok((req.name.clone(), None));
+    }
+
+    // Поиск поставщиков по provides.virtual.
+    let providers = source.providers(&req.name)?;
+    if providers.is_empty() {
+        // Пусть обработка ошибки произойдёт на этапе candidates (единый путь).
+        return Ok((req.name.clone(), None));
+    }
+    let satisfying: Vec<Candidate> = providers
+        .into_iter()
+        .filter(|c| req.req.as_ref().map_or(true, |r| c.version.satisfies(r)))
+        .collect();
+    if satisfying.is_empty() {
+        return Ok((req.name.clone(), None)); // дальше Unresolved с пустым списком
+    }
+
+    // Выбор поставщика: установленный > предпочтение пользователя > единственный.
+    if let Some(installed) = options.installed {
+        if let Some(found) = satisfying.iter().find(|c| installed.installed(&c.name).is_some()) {
+            return Ok((found.name.clone(), Some(req.name.clone())));
+        }
+    }
+    if let Some(preferred) = &options.provider {
+        if let Some(found) = satisfying.iter().find(|c| &c.name == preferred) {
+            return Ok((found.name.clone(), Some(req.name.clone())));
+        }
+    }
+    if let Some(selected) = select_latest_satisfying(&satisfying, &DepReq {
+        name: req.name.clone(),
+        req: None,
+    }) {
+        let distinct: std::collections::BTreeSet<&str> =
+            satisfying.iter().map(|c| c.name.as_str()).collect();
+        if distinct.len() > 1 {
+            // Разные поставщики с подходящей версией — нужен выбор пользователя.
+            return Err(ResolveError::AmbiguousProvider {
+                virtual_name: req.name.clone(),
+                providers: distinct.into_iter().map(str::to_string).collect(),
+            });
+        }
+        return Ok((selected.name.clone(), Some(req.name.clone())));
+    }
+
+    Ok((req.name.clone(), None))
+}
+
+fn push_dependency(
+    nodes: &mut BTreeMap<String, CollectedNode>,
+    parent: Option<&str>,
+    dep: &str,
+) {
+    if let Some(parent) = parent {
+        if let Some(node) = nodes.get_mut(parent) {
+            if !node.dependencies.iter().any(|d| d == dep) {
+                node.dependencies.push(dep.to_string());
+            }
+        }
+    }
 }
 
 fn merge_edge(node: &mut CollectedNode, kind: DepKind, parent: Option<&str>) {
@@ -277,4 +456,133 @@ fn merge_edge(node: &mut CollectedNode, kind: DepKind, parent: Option<&str>) {
     if parent.is_some() || !node.is_target {
         node.required_by.push((parent.map(str::to_string), kind));
     }
+}
+
+/// Проверка `conflicts` всех выбранных (и установленных) пакетов (этап 5.5).
+fn check_conflicts(
+    set: &RequirementSet,
+    installed: Option<&dyn InstalledSource>,
+) -> ResolveResult<()> {
+    let names: Vec<String> = set.nodes.keys().cloned().collect();
+    for name in &names {
+        let node = &set.nodes[name];
+        for conflict in &node.conflicts {
+            // Против выбранных узлов.
+            for (other_name, other) in &set.nodes {
+                if other_name == name {
+                    continue;
+                }
+                if conflict_matches(conflict, other_name, &other.version) {
+                    return Err(ResolveError::Conflict {
+                        pkg: name.clone(),
+                        conflicting: other_name.clone(),
+                        req: conflict.to_string(),
+                    });
+                }
+            }
+            // Против установленных пакетов, не входящих в план.
+            if let Some(installed) = installed {
+                if let Some(inst) = installed.installed(&conflict.name) {
+                    let in_set = set.nodes.contains_key(&conflict.name);
+                    if !in_set && conflict_matches(conflict, &inst.name, &inst.version) {
+                        return Err(ResolveError::Conflict {
+                            pkg: name.clone(),
+                            conflicting: inst.name,
+                            req: conflict.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn conflict_matches(req: &DepReq, name: &str, version: &Version) -> bool {
+    if req.name != name {
+        return false;
+    }
+    req.req.as_ref().map_or(true, |r| version.satisfies(r))
+}
+
+/// Обнаружение циклов по `deps.build` (этап 5.5). Runtime-цикл разрешён.
+fn check_build_cycles(set: &RequirementSet) -> ResolveResult<()> {
+    // adjacency по build-рёбрам: parent -> build-зависимость.
+    // Зависимость может указывать на виртуальное имя; фактический узел —
+    // тот, у кого provided_for == этому имени.
+    let mut build_adj: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for edge in &set.edges {
+        if edge.kind != DepKind::Build {
+            continue;
+        }
+        if let Some(from) = edge.from.as_deref() {
+            // Зависимость может указывать на виртуальное имя; найдём фактический узел
+            // как тот, у кого required_by содержит from:Build — или по имени.
+            let target = if set.nodes.contains_key(&edge.req.name) {
+                edge.req.name.as_str()
+            } else {
+                // поставщик виртуального пакета
+                set.nodes
+                    .values()
+                    .find(|n| n.provided_for.as_deref() == Some(edge.req.name.as_str()))
+                    .map(|n| n.name.as_str())
+                    .unwrap_or(edge.req.name.as_str())
+            };
+            build_adj.entry(from).or_default().push(target);
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let mut color: BTreeMap<&str, Color> = set.nodes.keys().map(|k| (k.as_str(), Color::White)).collect();
+    let mut stack: Vec<&str> = Vec::new();
+
+    fn dfs<'a>(
+        node: &'a str,
+        adj: &BTreeMap<&'a str, Vec<&'a str>>,
+        color: &mut BTreeMap<&'a str, Color>,
+        stack: &mut Vec<&'a str>,
+    ) -> Result<(), Vec<&'a str>> {
+        color.insert(node, Color::Gray);
+        stack.push(node);
+        if let Some(children) = adj.get(node) {
+            for &child in children {
+                match color.get(child).copied().unwrap_or(Color::White) {
+                    Color::White => {
+                        if let Err(path) = dfs(child, adj, color, stack) {
+                            return Err(path);
+                        }
+                    }
+                    Color::Gray => {
+                        let mut path: Vec<&str> = stack
+                            .iter()
+                            .skip_while(|&&n| n != child)
+                            .copied()
+                            .collect();
+                        path.push(child);
+                        return Err(path);
+                    }
+                    Color::Black => {}
+                }
+            }
+        }
+        stack.pop();
+        color.insert(node, Color::Black);
+        Ok(())
+    }
+
+    for node in set.nodes.keys().map(String::as_str).collect::<Vec<_>>() {
+        if color[node] == Color::White {
+            if let Err(path) = dfs(node, &build_adj, &mut color, &mut stack) {
+                return Err(ResolveError::BuildCycle {
+                    path: path.join(" -> "),
+                });
+            }
+        }
+    }
+    Ok(())
 }
