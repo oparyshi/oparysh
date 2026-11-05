@@ -1,0 +1,25 @@
+[pkg]
+name     = "hello-tools"
+version  = "1.0.0"
+build    = 1
+arch     = ["x86_64"]
+desc     = "Extra command-line utilities for hello"
+license  = "MIT"
+homepage = "https://example.org/hello-tools"
+
+[source]
+file   = "hello-tools-1.0.0.tar.gz"
+sha256 = "c855fa376b5f7236ee9fff96bdd8b4471610d1783845b43e5683147bd0e5e5c3"
+
+[deps]
+build = ["make>=4.0"]
+run   = ["hello>=1.0"]
+
+[build]
+system = "make-only"
+
+[build.install]
+prefix = "/usr/local"
+
+[files]
+unknown_warn = true

@@ -1,0 +1,49 @@
+[repo]
+name = "mini"
+".origin" = "https://example.org/mini"
+updated = 1704067200
+
+[[pkg]]
+name = "hello"
+version = "1.0.0"
+build = 1
+arch = ["x86_64"]
+desc = "Hello world program from the mini repository fixture"
+tags = []
+deps = [
+    "libgreet>=1.0",
+    "make>=4.0",
+]
+provides = []
+conflicts = []
+recipe_sha = "46845b85a7755e002a176c3d801f53fa47eb019968ca1fc6a6b90646650b5cdf"
+src_sha256 = "f2fd03b7c33a458ca1e9b0741bf5516d113aa93de7e45847321043156fa890e2"
+
+[[pkg]]
+name = "hello-tools"
+version = "1.0.0"
+build = 1
+arch = ["x86_64"]
+desc = "Extra command-line utilities for hello"
+tags = []
+deps = [
+    "hello>=1.0",
+    "make>=4.0",
+]
+provides = []
+conflicts = []
+recipe_sha = "aef106e5250490a0d837f3ee52dfcef1bd3696f71d4028b7ae640d87ec52552b"
+src_sha256 = "c855fa376b5f7236ee9fff96bdd8b4471610d1783845b43e5683147bd0e5e5c3"
+
+[[pkg]]
+name = "libgreet"
+version = "1.0.0"
+build = 1
+arch = ["x86_64"]
+desc = "Small greeting library used by the mini repository fixture"
+tags = []
+deps = []
+provides = ["greet"]
+conflicts = []
+recipe_sha = "f6f1f07ad963d2cb109ba4cfc5c166e7b4e17e98cdda51ac49ed01d7414fe06b"
+src_sha256 = "af90d7975136bf2a1bc4948bfe2453ffa52d3e4d4e0c9115c8df315d46165d51"

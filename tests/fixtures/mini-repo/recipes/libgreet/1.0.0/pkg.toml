@@ -1,0 +1,28 @@
+[pkg]
+name     = "libgreet"
+version  = "1.0.0"
+build    = 1
+arch     = ["x86_64"]
+desc     = "Small greeting library used by the mini repository fixture"
+license  = "MIT"
+homepage = "https://example.org/libgreet"
+
+[source]
+file   = "libgreet-1.0.0.tar.gz"
+sha256 = "af90d7975136bf2a1bc4948bfe2453ffa52d3e4d4e0c9115c8df315d46165d51"
+
+[deps]
+build = []
+run   = []
+
+[provides]
+virtual = ["greet"]
+
+[build]
+system = "make-only"
+
+[build.install]
+prefix = "/usr/local"
+
+[files]
+unknown_warn = true

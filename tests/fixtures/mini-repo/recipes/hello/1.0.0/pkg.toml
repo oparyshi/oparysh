@@ -1,0 +1,25 @@
+[pkg]
+name     = "hello"
+version  = "1.0.0"
+build    = 1
+arch     = ["x86_64"]
+desc     = "Hello world program from the mini repository fixture"
+license  = "MIT"
+homepage = "https://example.org/hello"
+
+[source]
+file   = "hello-1.0.0.tar.gz"
+sha256 = "f2fd03b7c33a458ca1e9b0741bf5516d113aa93de7e45847321043156fa890e2"
+
+[deps]
+build = ["make>=4.0"]
+run   = ["libgreet>=1.0"]
+
+[build]
+system = "make-only"
+
+[build.install]
+prefix = "/usr/local"
+
+[files]
+unknown_warn = true

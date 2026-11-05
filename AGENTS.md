@@ -10,7 +10,7 @@ cargo test --workspace          # то же, что гоняет CI (.github/wor
 cargo test -p oparysh-core      # тесты одного crate
 ```
 
-Отдельного `lint`/`fmt` в CI нет. `tests/integration/` пока пуст; юнит-тесты лежат внутри crate'­ов, фикстуры — `tests/fixtures/hello-1.0` (фальшивый make-пакет: `pkg.toml`, `hello.c`, `Makefile`, и его же `src_sha256`/`recipe_sha` нужны для тестов verifier/db).
+Отдельного `lint`/`fmt` в CI нет. `tests/integration/` пока пуст; юнит-тесты лежат внутри crate'­ов, фикстуры — `tests/fixtures/hello-1.0` (фальшивый make-пакет: `pkg.toml`, `hello.c`, `Makefile`, и его же `src_sha256`/`recipe_sha` нужны для тестов verifier/db) и `tests/fixtures/mini-repo` (локальный репозиторий из 3 пакетов с реальными `index.toml`, `recipes/`, `dist/`; интеграционные тесты — `crates/oparysh-repo/tests/mini_repo.rs`).
 
 ## Структура
 
