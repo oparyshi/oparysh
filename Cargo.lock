@@ -532,9 +532,11 @@ dependencies = [
  "regex",
  "serde",
  "sha2",
+ "tar",
  "thiserror",
  "toml",
  "ureq",
+ "zstd",
 ]
 
 [[package]]

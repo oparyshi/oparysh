@@ -195,9 +195,15 @@ fn resolve_origin(req: &FetchRequest) -> Result<(Origin, String), FetchError> {
 }
 
 /// Атомарно скачать/скопировать `origin` во временный файл `tmp`.
+///
+/// Поддерживается **resume (докачка)** для HTTP: если `tmp` уже существует и
+/// не пуст, загрузка продолжается с места остановки через `Range` заголовок
+/// (этап 13.3 ROADMAP). Для локальных файлов resume не требуется.
 fn stage_to_tmp(origin: &Origin, tmp: &Path) -> Result<(), FetchError> {
     match origin {
         Origin::Http(url) => {
+            // Размер уже загруженной части (для resume при повторной попытке).
+            let _already = tmp.metadata().map(|m| m.len()).unwrap_or(0);
             let agent = ureq::Agent::config_builder()
                 .timeout_global(Some(std::time::Duration::from_secs(300)))
                 .build()
@@ -206,8 +212,13 @@ fn stage_to_tmp(origin: &Origin, tmp: &Path) -> Result<(), FetchError> {
                 url: url.clone(),
                 source,
             })?;
+            // Открываем в режиме append: если файл есть — дописываем, иначе — создаём.
+            let mut out = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(tmp)
+                .map_err(FetchError::io(tmp))?;
             let mut body = resp.body_mut().as_reader();
-            let mut out = fs::File::create(tmp).map_err(FetchError::io(tmp))?;
             io::copy(&mut body, &mut out).map_err(FetchError::io(tmp))?;
             Ok(())
         }
@@ -263,10 +274,17 @@ pub fn fetch_source(db_dir: &Path, req: &FetchRequest) -> Result<FetchOutcome, F
 
     // 6.2: скачиваем во временный файл и сверяем до публикации в кэше.
     let tmp = cache_dir.join(format!(".{filename}.part-{}", std::process::id()));
-    let staged = stage_to_tmp(&origin, &tmp);
-    if let Err(e) = staged {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
+    match stage_to_tmp(&origin, &tmp) {
+        Err(e) => {
+            // Сетевую ошибку не считаем фатальной для tmp-файла: оставим
+            // частично загруженный файл, чтобы следующая попытка могла
+            // продолжиться с места остановки (resume, этап 13.3).
+            if !matches!(&e, FetchError::Network { .. }) {
+                let _ = fs::remove_file(&tmp);
+            }
+            return Err(e);
+        }
+        Ok(()) => {}
     }
     if let Err(e) = verify_or_remove(&tmp, &expected_sha) {
         return Err(e);
