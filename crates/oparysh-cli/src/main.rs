@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser};
+use oparysh_cli::style;
 use oparysh_core::config::OparyshConfig;
 use oparysh_core::config_edit;
 use oparysh_db::{rebuild_db_from_backup, Database, Package};
@@ -45,18 +46,35 @@ fn config_path(explicit: Option<&Path>) -> PathBuf {
 
 /// Прочитать конфиг: файл из `OPARYSH_CONFIG` или `/etc/oparysh/oparysh.conf`;
 /// отсутствие файла — это дефолтный конфиг (для sync это норма, репозитории
-/// настраиваются в нём же).
+/// настраиваются в нём же). После разбора применяются перекрытия `OPARYSH_*`
+/// из окружения (DOCS §12, этап 11.4).
 fn load_config(explicit: Option<&Path>) -> OparyshConfig {
     let path = config_path(explicit);
     // Коды возврата (DOCS §11): нечитаемый/битый конфиг — общая ошибка 1.
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    match OparyshConfig::parse(&text) {
+    let mut cfg = match OparyshConfig::parse(&text) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("ERROR: не удалось разобрать {}: {e}", path.display());
             std::process::exit(1);
         }
+    };
+    if let Err(e) = cfg.apply_env_overrides() {
+        // Некорректное значение переменной окружения — неверный аргумент (2).
+        eprintln!("ERROR: {e}");
+        std::process::exit(2);
     }
+    if verbose() {
+        eprintln!(
+            "verbose: config={} db_dir={} cache_dir={} destroot={} profile={}",
+            path.display(),
+            cfg.general.db_dir,
+            cfg.general.cache_dir,
+            cfg.general.destroot,
+            cfg.active_profile(),
+        );
+    }
+    cfg
 }
 
 /// Прочитать сырой текст конфига (для редактирования `repo add/del`);
@@ -67,19 +85,20 @@ fn load_config_text() -> (PathBuf, String) {
     (path, text)
 }
 
-/// Каталог кэша: `OPARYSH_CACHE_DIR` перекрывает конфиг (DOCS §12).
+/// Включён ли подробный вывод диагностики (`--verbose` или `OPARYSH_VERBOSE`).
+fn verbose() -> bool {
+    std::env::var_os("OPARYSH_VERBOSE").is_some()
+}
+
+/// Каталог кэша: `OPARYSH_CACHE_DIR` перекрывает конфиг (DOCS §12,
+/// применяется в [`load_config`]).
 fn cache_dir(config: &OparyshConfig) -> PathBuf {
-    if let Some(dir) = std::env::var_os("OPARYSH_CACHE_DIR") {
-        return PathBuf::from(dir);
-    }
     PathBuf::from(&config.general.cache_dir)
 }
 
-/// Каталог базы: `OPARYSH_DB_DIR` перекрывает конфиг (DOCS §12).
+/// Каталог базы: `OPARYSH_DB_DIR` перекрывает конфиг (DOCS §12,
+/// применяется в [`load_config`]).
 fn db_dir(config: &OparyshConfig) -> PathBuf {
-    if let Some(dir) = std::env::var_os("OPARYSH_DB_DIR") {
-        return PathBuf::from(dir);
-    }
     PathBuf::from(&config.general.db_dir)
 }
 
@@ -744,6 +763,24 @@ fn run_repo_list() {
 #[derive(Parser)]
 #[command(name = "oparysh", version, about = "Source-based package manager")]
 struct Cli {
+    /// Путь к конфигу (по умолчанию /etc/oparysh/oparysh.conf или $OPARYSH_CONFIG)
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
+    /// Перекрыть `db_dir` (как OPARYSH_DB_DIR)
+    #[arg(long, global = true, value_name = "PATH")]
+    db_dir: Option<PathBuf>,
+    /// Перекрыть `cache_dir` (как OPARYSH_CACHE_DIR)
+    #[arg(long, global = true, value_name = "PATH")]
+    cache_dir: Option<PathBuf>,
+    /// Установить в другой корень — chroot-установка (как OPARYSH_ROOT)
+    #[arg(long, global = true, value_name = "PATH")]
+    root: Option<PathBuf>,
+    /// Перекрыть число заданий сборки (как OPARYSH_JOBS)
+    #[arg(long, global = true, value_name = "N")]
+    jobs: Option<u32>,
+    /// Подробная диагностика в stderr
+    #[arg(short, long, global = true)]
+    verbose: bool,
     /// Не спрашивать подтверждение у команд, которые его поддерживают
     #[arg(long, global = true)]
     yes: bool,
@@ -753,6 +790,12 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Сверить установленные файлы с БД (sha256): removed | modified | new (этап 11.1/11.6)
+    Check {
+        /// Пакеты для проверки; пусто — все установленные (полный аудит)
+        #[arg(value_name = "PKG")]
+        pkgs: Vec<String>,
+    },
     /// Verify a tarball's SHA-256 (stage 2)
     Verify {
         /// Путь к тарболу для проверки
@@ -763,9 +806,9 @@ enum Command {
     },
     /// Восстановить базу данных из резервной копии db.sqlite.bak (stage 3.6)
     RebuildDb {
-        /// Директория базы (по умолчанию /var/lib/oparysh)
-        #[arg(long, default_value = "/var/lib/oparysh")]
-        db_dir: PathBuf,
+        /// Директория базы (по умолчанию — из конфига/OPARYSH_DB_DIR)
+        #[arg(long, value_name = "PATH")]
+        db_dir: Option<PathBuf>,
     },
     /// Скачать/обновить index.toml всех (или указанных) репозиториев (stage 4.4)
     Sync {
@@ -979,6 +1022,134 @@ fn split_plan_args(args: &[String]) -> (Vec<String>, Vec<String>) {
         }
     }
     (specs, features)
+}
+
+/// `oparysh check [pkg…]` (этап 11.1/11.6): сверить установленные файлы с БД.
+///
+/// Для каждого пакета: существование файла → sha256 против `files.sha256`.
+/// Статусы (DOCS §9): `removed` (нет на диске), `modified` (хэш не совпал),
+/// `new` (файл есть в каталоге пакета, но не известен БД). «new» ищется
+/// нерекурсивно в родительских каталогах известных файлов — новые
+/// подкаталоги так не обнаруживаются (осознанное ограничение).
+///
+/// Код возврата: `0` — всё цело, `1` — найдены расхождения, `3` — пакет
+/// не установлен, `8` — ошибка БД.
+fn run_check(pkgs: &[String]) {
+    let config = load_config(None);
+    let db = open_db(&config);
+    let installed = match db.list_packages() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(8);
+        }
+    };
+
+    // Все пути, известные БД (по всем пакетам) — чтобы чужой файл не считался «new».
+    let mut tracked: HashSet<String> = HashSet::new();
+    for pkg in &installed {
+        match db.get_files(&pkg.name) {
+            Ok(files) => tracked.extend(files.into_iter().map(|f| f.path)),
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(8);
+            }
+        }
+    }
+
+    let targets: Vec<oparysh_db::Package> = if pkgs.is_empty() {
+        installed.clone()
+    } else {
+        let mut out = Vec::with_capacity(pkgs.len());
+        for name in pkgs {
+            match installed.iter().find(|p| &p.name == name) {
+                Some(p) => out.push(p.clone()),
+                None => {
+                    eprintln!("ERROR: пакет `{name}` не установлен");
+                    std::process::exit(3);
+                }
+            }
+        }
+        out
+    };
+    if targets.is_empty() {
+        println!("нет установленных пакетов");
+        return;
+    }
+
+    let mut issues = 0usize;
+    let mut checked = 0usize;
+    for pkg in &targets {
+        let files = match db.get_files(&pkg.name) {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(8);
+            }
+        };
+        println!(
+            "{} {} {}",
+            style::bold(&pkg.name),
+            pkg.version,
+            style::dim(&format!("(build {})", pkg.build_rev))
+        );
+        for f in &files {
+            checked += 1;
+            let path = Path::new(&f.path);
+            if std::fs::symlink_metadata(path).is_err() {
+                println!("  {} {}", style::red("removed "), f.path);
+                issues += 1;
+                continue;
+            }
+            match oparysh_verifier::sha256_file(path) {
+                Ok(hash) if hash == f.sha256 => {}
+                Ok(_) => {
+                    println!("  {} {}", style::red("modified"), f.path);
+                    issues += 1;
+                }
+                Err(_) => {
+                    println!("  {} {} (не читается)", style::red("modified"), f.path);
+                    issues += 1;
+                }
+            }
+        }
+        // «new»: непосредственные файлы в каталогах пакета, не известные БД.
+        let parent_dirs: HashSet<PathBuf> = files
+            .iter()
+            .filter_map(|f| Path::new(&f.path).parent().map(Path::to_path_buf))
+            .collect();
+        for dir in parent_dirs {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let is_file = entry
+                    .file_type()
+                    .map(|t| t.is_file() || t.is_symlink())
+                    .unwrap_or(false);
+                if !is_file {
+                    continue;
+                }
+                let path = entry.path();
+                let key = path.to_string_lossy().into_owned();
+                if !tracked.contains(&key) {
+                    println!("  {} {}", style::yellow("new     "), key);
+                    issues += 1;
+                }
+            }
+        }
+    }
+
+    if issues == 0 {
+        println!("{} ({} файлов)", style::green("все файлы целы"), checked);
+    } else {
+        eprintln!(
+            "{}: расхождений: {issues} (проверено файлов: {checked})",
+            style::red("check failed")
+        );
+        std::process::exit(1);
+    }
 }
 
 /// `oparysh clean` (stage 6.6): удалить выбранные подкаталоги базы,
@@ -2167,6 +2338,23 @@ fn run_history(pkg: Option<&str>) {
 
 fn main() {
     let cli = Cli::parse();
+    // Глобальные опции эквивалентны переменным окружения `OPARYSH_*`
+    // (DOCS §10/§12, этап 11.5): применяем до любой работы с конфигом.
+    // Однопоточный момент до запуска рабочих потоков — set_var безопасен.
+    for (key, value) in [
+        ("OPARYSH_CONFIG", cli.config.as_deref().map(|p| p.as_os_str().to_os_string())),
+        ("OPARYSH_DB_DIR", cli.db_dir.as_deref().map(|p| p.as_os_str().to_os_string())),
+        ("OPARYSH_CACHE_DIR", cli.cache_dir.as_deref().map(|p| p.as_os_str().to_os_string())),
+        ("OPARYSH_ROOT", cli.root.as_deref().map(|p| p.as_os_str().to_os_string())),
+        ("OPARYSH_JOBS", cli.jobs.map(|n| n.to_string().into())),
+    ] {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        }
+    }
+    if cli.verbose {
+        std::env::set_var("OPARYSH_VERBOSE", "1");
+    }
     let assume_yes = cli.yes;
     match cli.command {
         Some(Command::Verify { tarball, expected }) => {
@@ -2192,8 +2380,10 @@ fn main() {
                 }
             }
         }
-        Some(Command::RebuildDb { db_dir }) => {
-            match rebuild_db_from_backup(&db_dir) {
+        Some(Command::Check { pkgs }) => run_check(&pkgs),
+        Some(Command::RebuildDb { db_dir: dir }) => {
+            let dir = dir.unwrap_or_else(|| db_dir(&load_config(None)));
+            match rebuild_db_from_backup(&dir) {
                 Ok(bak) => {
                     println!("База восстановлена из {}", bak.display());
                 }

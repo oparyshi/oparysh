@@ -211,10 +211,103 @@ pub struct RepoEntry {
     pub key: Option<String>,
 }
 
+/// Ошибка применения переменных окружения `OPARYSH_*` (DOCS §12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvOverrideError {
+    /// Имя переменной, вызвавшей ошибку.
+    pub var: &'static str,
+    /// Описание проблемы.
+    pub message: String,
+}
+
+impl std::fmt::Display for EnvOverrideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.var, self.message)
+    }
+}
+
+impl std::error::Error for EnvOverrideError {}
+
+/// Склеить фрагмент флагов с существующим значением через один пробел.
+fn append_flag(base: &str, extra: &str) -> String {
+    let extra = extra.trim();
+    if extra.is_empty() {
+        return base.trim().to_string();
+    }
+    let base = base.trim();
+    if base.is_empty() {
+        extra.to_string()
+    } else {
+        format!("{base} {extra}")
+    }
+}
+
 impl OparyshConfig {
     /// Разобрать `oparysh.conf` из строки TOML.
     pub fn parse(toml_str: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(toml_str)
+    }
+
+    /// Применить перекрытия из переменных окружения `OPARYSH_*` (DOCS §12).
+    ///
+    /// Переменные перекрывают значения конфига; `OPARYSH_CFLAGS`/`OPARYSH_CXXFLAGS`/
+    /// `OPARYSH_MAKEOPTS` дописываются **после** `[build.extra]` (как и оно —
+    /// поверх профиля). Пустые строки трактуются как «не задано».
+    ///
+    /// Не задаёт `OPARYSH_NO_COLORS`/`NO_COLOR` (это про оформление вывода,
+    /// см. `oparysh_cli::style`) и `OPARYSH_CONFIG` (путь к самому конфигу).
+    pub fn apply_env_overrides(&mut self) -> Result<(), EnvOverrideError> {
+        self.apply_env_overrides_with(|key| std::env::var(key).ok())
+    }
+
+    /// Вариант [`OparyshConfig::apply_env_overrides`] с внедряемым источником
+    /// значений — для тестов без модификации реального окружения.
+    pub fn apply_env_overrides_with(
+        &mut self,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Result<(), EnvOverrideError> {
+        let non_empty = |key: &str| get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+
+        if let Some(v) = non_empty("OPARYSH_DB_DIR") {
+            self.general.db_dir = v;
+        }
+        if let Some(v) = non_empty("OPARYSH_CACHE_DIR") {
+            self.general.cache_dir = v;
+        }
+        if let Some(v) = non_empty("OPARYSH_ROOT") {
+            self.general.destroot = v;
+        }
+        if let Some(v) = non_empty("OPARYSH_JOBS") {
+            self.general.jobs = v.parse::<u32>().map_err(|_| EnvOverrideError {
+                var: "OPARYSH_JOBS",
+                message: format!("ожидалось положительное число, получено «{v}»"),
+            })?;
+            if self.general.jobs == 0 {
+                return Err(EnvOverrideError {
+                    var: "OPARYSH_JOBS",
+                    message: "значение должно быть >= 1".to_string(),
+                });
+            }
+        }
+        if let Some(v) = non_empty("OPARYSH_CC") {
+            self.toolchain.cc = v;
+        }
+        if let Some(v) = non_empty("OPARYSH_CXX") {
+            self.toolchain.cxx = v;
+        }
+        if let Some(v) = non_empty("OPARYSH_CFLAGS") {
+            self.build.extra.cflags = append_flag(&self.build.extra.cflags, &v);
+        }
+        if let Some(v) = non_empty("OPARYSH_CXXFLAGS") {
+            self.build.extra.cxxflags = append_flag(&self.build.extra.cxxflags, &v);
+        }
+        if let Some(v) = non_empty("OPARYSH_MAKEOPTS") {
+            self.build.extra.makeopts = append_flag(&self.build.extra.makeopts, &v);
+        }
+        if let Some(v) = non_empty("OPARYSH_PROFILE") {
+            self.build.active.profile = v;
+        }
+        Ok(())
     }
 
     /// Вернуть имя активного профиля.

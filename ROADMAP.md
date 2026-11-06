@@ -75,7 +75,7 @@
 - [x] 5.8. Команды `deps [--tree]`, `rdeps`, `why`
 - [x] 5.9. Тесты resolver'а: цепочка a→b→c, конфликт версий, цикл, виртуальный пакет
 
-## Этап 6. Fetcher (кэш и загрузка) ☐
+## Этап 6. Fetcher (кэш и загрузка) ☑
 **нужно:** этап 2, 4
 
 - [x] 6.1. Кэш исходников `src/`: найти в кэше → проверить sha256 → иначе скачать
@@ -120,7 +120,7 @@
 - [x] 9.4. Очистка связанной таблицы: recipes-кэш, записи БД (каскад)
 - [x] 9.5. Тесты: удаление свободного пакета, отказ при rdeps, force, autoremove
 
-## Этап 10. Upgrade / Downgrade / история ◐
+## Этап 10. Upgrade / Downgrade / история ☑
 **нужно:** этап 8, 9, 5
 
 - [x] 10.1. `oparysh upgrade [pkg…]`: перерезолвинг установленных, пересборка зависимых (+1 к `build`)
@@ -129,15 +129,15 @@
 - [x] 10.4. Проверка `--outdated`, `--orphaned` для `list`
 - [x] 10.5. Сценарий-тест: install → upgrade → autoremove (как в приложении A) (`crates/oparysh-cli/tests/scenario_install_upgrade_autoremove.rs`)
 
-## Этап 11. Диагностика и целостность установленного ☐
+## Этап 11. Диагностика и целостность установленного ☑
 **нужно:** этап 3, 8
 
-- [ ] 11.1. `oparysh check [pkg…]`: сверка файлов с БД (sha256) → отчёт `removed | modified | new`
-- [ ] 11.2. Цветной вывод + `NO_COLOR` / `OPARYSH_NO_COLORS`
-- [ ] 11.3. Единые коды возврата (раздел 11): 0–9 во всех командах, тесты на коды
-- [ ] 11.4. Переменные окружения `OPARYSH_*` (раздел 12) — перекрытие конфига, тест
-- [ ] 11.5. `--root <path>` / `--db-dir` / `--cache-dir` / `--config` глобальные опции
-- [ ] 11.6. `oparysh clean --all`, `check` для всех пакетов (аудит)
+- [x] 11.1. `oparysh check [pkg…]`: сверка файлов с БД (sha256) → отчёт `removed | modified | new` (`crates/oparysh-cli/src/main.rs::run_check`, тесты `tests/check_cmd.rs`)
+- [x] 11.2. Цветной вывод + `NO_COLOR` / `OPARYSH_NO_COLORS` (`crates/oparysh-cli/src/style.rs`, unit-тесты)
+- [x] 11.3. Единые коды возврата (раздел 11): 0–9 во всех командах, тесты на коды (`crates/oparysh-cli/tests/exit_codes.rs`)
+- [x] 11.4. Переменные окружения `OPARYSH_*` (раздел 12) — перекрытие конфига, тест (`OparyshConfig::apply_env_overrides[_with]`, `crates/oparysh-core/tests/env_overrides_test.rs`)
+- [x] 11.5. `--root <path>` / `--db-dir` / `--cache-dir` / `--config` глобальные опции (`crates/oparysh-cli/tests/global_opts.rs`)
+- [x] 11.6. `oparysh clean --all`, `check` для всех пакетов (аудит) (`oparysh check` без аргументов = полный аудит; `tests/check_cmd.rs::check_named_package_and_full_audit`)
 
 ## Этап 12. Конфиг и профили — полный цикл ☐
 **нужно:** этап 7
