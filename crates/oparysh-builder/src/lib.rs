@@ -11,6 +11,10 @@
 //! - **7.5** — суженное окружение процесса: фиксированный `PATH`, компиляторы и
 //!   флаги (`CC/CXX/CPP/CFLAGS/…`) только из конфига/профиля, плюс явно указанные
 //!   переменные из `[build.extra].env` и `[build].env = {}`.
+//! - **7.6** — выполнение плана сборки (`run_build_plan`): вывод каждого шага
+//!   пишется в лог `logs/<pkg>-<ver>-<date>.log`; первый упавший шаг прерывает
+//!   сборку, каталог `build/` сохраняется, `BuildRunError::Failed` → код
+//!   возврата **7** (DOCS §11).
 
 use oparysh_core::config::OparyshConfig;
 use oparysh_core::recipe::Recipe;
@@ -381,4 +385,180 @@ pub fn substitute(input: &str, subs: &Substitutions) -> Result<String, SubstErro
 /// Подставить переменные во все аргументы шага.
 pub fn substitute_args(args: &[String], subs: &Substitutions) -> Result<Vec<String>, SubstError> {
     args.iter().map(|a| substitute(a, subs)).collect()
+}
+
+// ---------------------------------------------------------------------------
+// 7.6 — выполнение плана сборки с логом в logs/<pkg>-<ver>-<date>.log
+// ---------------------------------------------------------------------------
+
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+
+/// Дата по UTC в формате `YYYYMMDD` для имени лог-файла (без зависимостей).
+fn today_stamp() -> String {
+    /// Howard Hinnant: григорианская дата по числу дней от эпохи.
+    fn civil_from_days(z: i64) -> (i64, u32, u32) {
+        let z = z + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        (if m <= 2 { y + 1 } else { y }, m, d)
+    }
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 86_400;
+    let (y, m, d) = civil_from_days(days as i64);
+    format!("{y:04}{m:02}{d:02}")
+}
+
+/// Путь лога сборки: `<db_dir>/logs/<pkg>-<ver>-<date>.log` (DOCS §3, §8).
+pub fn build_log_path(
+    db_dir: &Path,
+    pkg: &str,
+    version: &str,
+    date: &str,
+) -> PathBuf {
+    db_dir
+        .join("logs")
+        .join(format!("{pkg}-{version}-{date}.log"))
+}
+
+/// Путь лога сборки с текущей датой.
+pub fn today_log_path(db_dir: &Path, pkg: &str, version: &str) -> PathBuf {
+    build_log_path(db_dir, pkg, version, &today_stamp())
+}
+
+/// Ошибки выполнения шагов сборки (7.6).
+#[derive(Debug, Error)]
+pub enum BuildRunError {
+    /// Процесс не удалось запустить (несуществующий executable).
+    #[error("шаг `{phase}` ({executable}): не запущен: {source}")]
+    Spawn {
+        phase: String,
+        executable: String,
+        #[source]
+        source: io::Error,
+    },
+    /// Шаг вернул ненулевой код — сборка прервана, `build/` сохранён, код возврата 7.
+    #[error("шаг `{phase}` ({executable}) завершился с кодом {exit_code} — сборка прервана, build/ сохранён")]
+    Failed { phase: String, executable: String, exit_code: i32 },
+    /// Ошибка записи в лог-файл.
+    #[error("не удалось записать лог сборки: {0}")]
+    Log(#[from] io::Error),
+}
+
+/// Код возврата DOCS §11 для ошибки сборки.
+pub const BUILD_FAILED_EXIT_CODE: i32 = 7;
+
+/// Выполнить один шаг в `work_dir` с окружением `env`, вывод — в лог и на экран.
+fn run_step(
+    step: &BuildStep,
+    work_dir: &Path,
+    env: &BTreeMap<String, String>,
+    log: &mut File,
+) -> Result<(), BuildRunError> {
+    let executable = step.argv.first().cloned().unwrap_or_default();
+    let exe_display = executable.clone();
+    writeln!(
+        log,
+        "== [{}] {} ==",
+        step.phase.as_str(),
+        step.argv.join(" ")
+    )?;
+    log.flush()?;
+
+    let mut child = std::process::Command::new(&executable)
+        .args(&step.argv[1..])
+        .current_dir(work_dir)
+        .env_clear()
+        .envs(env)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|source| BuildRunError::Spawn {
+            phase: step.phase.as_str().to_string(),
+            executable: exe_display.clone(),
+            source,
+        })?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|source| BuildRunError::Spawn {
+            phase: step.phase.as_str().to_string(),
+            executable: exe_display.clone(),
+            source,
+        })?;
+
+    log.write_all(&output.stdout)?;
+    log.write_all(&output.stderr)?;
+    log.flush()?;
+
+    let mut screen = io::stdout();
+    let _ = screen.write_all(&output.stdout);
+    let _ = screen.flush();
+    let mut screen_err = io::stderr();
+    let _ = screen_err.write_all(&output.stderr);
+    let _ = screen_err.flush();
+
+    match output.status.code() {
+        Some(0) => {}
+        Some(code) => {
+            writeln!(
+                log,
+                "== [{}] FAILED, exit {}: сборка прервана, build/ сохранён ==",
+                step.phase.as_str(),
+                code
+            )?;
+            log.flush()?;
+            return Err(BuildRunError::Failed {
+                phase: step.phase.as_str().to_string(),
+                executable,
+                exit_code: code,
+            });
+        }
+        // Убит сигналом: трактуем как падение (код возврата 7).
+        None => {
+            writeln!(log, "== [{}] FAILED (сигнал): сборка прервана ==", step.phase.as_str())?;
+            log.flush()?;
+            return Err(BuildRunError::Failed {
+                phase: step.phase.as_str().to_string(),
+                executable,
+                exit_code: -1,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Выполнить план сборки (7.6): шаги по порядку, вывод каждого шага
+/// дублируется в лог. Первый упавший шаг прерывает сборку; файлы `build/`
+/// не трогаются (сохраняются для отладки). По DOCS §8 п.6 лог дописывается
+/// и после commit — дописывать остаётся возможностью вызывающего.
+pub fn run_build_plan(
+    plan: &BuildPlan,
+    work_dir: &Path,
+    log: &mut File,
+) -> Result<(), BuildRunError> {
+    for step in &plan.steps {
+        let env = plan.env_for_step(step);
+        run_step(step, work_dir, &env, log)?;
+    }
+    writeln!(log, "== все шаги завершены успешно ==")?;
+    log.flush()?;
+    Ok(())
+}
+
+/// Прочитать лог (для тестов и `oparysh info`).
+pub fn read_log(path: &Path) -> io::Result<String> {
+    let mut s = String::new();
+    File::open(path)?.read_to_string(&mut s)?;
+    Ok(s)
 }
