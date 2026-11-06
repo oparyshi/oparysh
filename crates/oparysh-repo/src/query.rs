@@ -253,6 +253,7 @@ mod tests {
             path: path.map(str::to_string),
             url: url.map(str::to_string),
             key: None,
+        snapshot: None,
         }
     }
 

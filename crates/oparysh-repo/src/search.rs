@@ -249,10 +249,10 @@ mod tests {
         .unwrap();
 
         let entries = vec![
-            RepoEntry { name: "local".into(), path: Some(local.display().to_string()), url: None, key: None },
-            RepoEntry { name: "stable".into(), path: None, url: Some("https://repo.example.com".into()), key: None },
+            RepoEntry { name: "local".into(), path: Some(local.display().to_string()), url: None, key: None, snapshot: None },
+            RepoEntry { name: "stable".into(), path: None, url: Some("https://repo.example.com".into()), key: None, snapshot: None },
             // Не синхронизирован — должен попасть в skipped.
-            RepoEntry { name: "unsynced".into(), path: None, url: Some("https://repo2.example.com".into()), key: None },
+            RepoEntry { name: "unsynced".into(), path: None, url: Some("https://repo2.example.com".into()), key: None, snapshot: None },
         ];
 
         let pattern = SearchPattern::parse("*compiler*").unwrap();

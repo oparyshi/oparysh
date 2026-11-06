@@ -209,6 +209,10 @@ pub struct RepoEntry {
     pub url: Option<String>,
     #[serde(default)]
     pub key: Option<String>,
+    /// URL или путь к `database.tar.zst` — оффлайн-снапшоту репозитория
+    /// (этап 13.1 ROADMAP, DOCS §4).
+    #[serde(default)]
+    pub snapshot: Option<String>,
 }
 
 /// Ошибка применения переменных окружения `OPARYSH_*` (DOCS §12).

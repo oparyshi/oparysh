@@ -25,6 +25,7 @@ fn entry() -> RepoEntry {
         path: Some(fixture().display().to_string()),
         url: None,
         key: None,
+        snapshot: None,
     }
 }
 

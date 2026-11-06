@@ -9,6 +9,8 @@ ureq = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
+zstd = { workspace = true }
+tar = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 regex = { workspace = true }

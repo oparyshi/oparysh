@@ -694,6 +694,7 @@ fn run_repo_add(name: &str, target: &str) -> Result<String, String> {
         path: None,
         url: None,
         key: None,
+        snapshot: None,
     };
     // URL содержит схему (`://`); всё остальное — путь к локальному каталогу.
     if target.contains("://") {
