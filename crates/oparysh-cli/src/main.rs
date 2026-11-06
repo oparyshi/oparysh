@@ -245,7 +245,7 @@ fn run_plan(specs: &[String], features: &[String], assume_yes: bool) {
         println!("Отменено; изменения не внесены");
         return;
     }
-    println!("План подтверждён; установка будет выполнена командами этапов 6–8");
+    println!("План подтверждён; установку выполняет команда `oparysh install`");
 }
 
 /// Рекурсивная печать дочерних узлов с защитой от runtime-циклов.
@@ -845,6 +845,28 @@ enum Command {
         #[arg(long)]
         keep_build: bool,
     },
+    /// Разрешить зависимости, собрать и установить цели + build-зависимости (stage 8.6)
+    Install {
+        /// Цели: `pkg`, `pkg@ver`, необязательные зависимости через `+feature`;
+        /// не требуется при `--file`
+        #[arg(value_name = "PKG")]
+        specs: Vec<String>,
+        /// Установить из локального рецепта, минуя репозиторий (stage 8.5)
+        #[arg(long, value_name = "PKG_TOML")]
+        file: Option<PathBuf>,
+        /// Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`
+        #[arg(long = "set", value_name = "K=V")]
+        sets: Vec<String>,
+        /// Перекрыть число заданий сборки
+        #[arg(long = "jobs", value_name = "N")]
+        jobs: Option<u32>,
+        /// Незаявленные файлы (вне install.prefix) = ошибка (stage 8.2)
+        #[arg(long)]
+        strict: bool,
+        /// Не удалять каталог сборки <db_dir>/build/ после установки
+        #[arg(long)]
+        keep_build: bool,
+    },
     /// Управление репозиториями в конфиге (stage 4.5)
     Repo {
         #[command(subcommand)]
@@ -965,28 +987,7 @@ fn build_target(target: &str, config: &OparyshConfig, _assume_yes: bool) -> Resu
 
     // Каталог с pkg.toml — локальный рецепт, репозиторий не нужен.
     if path.is_dir() && path.join("pkg.toml").is_file() {
-        let raw = match std::fs::read_to_string(path.join("pkg.toml")) {
-            Ok(raw) => raw,
-            Err(e) => {
-                eprintln!("ERROR: не удалось прочитать {}/pkg.toml: {e}", path.display());
-                return Err(1);
-            }
-        };
-        let recipe = match oparysh_core::recipe::Recipe::parse(&raw) {
-            Ok(recipe) => recipe,
-            Err(e) => {
-                eprintln!("ERROR: не удалось разобрать {}/pkg.toml: {e}", path.display());
-                return Err(1);
-            }
-        };
-        return Ok(BuildTarget {
-            name: recipe.pkg.name.clone(),
-            version: recipe.pkg.version.clone(),
-            recipe,
-            recipe_dir: Some(path.to_path_buf()),
-            repo_dist: None,
-            raw_toml: raw.clone(),
-        });
+        return local_recipe_target(&path.join("pkg.toml"));
     }
 
     // Пакет из репозитория: выбираем кандидата напрямую (`build` собирает
@@ -1018,10 +1019,19 @@ fn build_target(target: &str, config: &OparyshConfig, _assume_yes: bool) -> Resu
         eprintln!("ERROR: пакет `{target}` не найден ни в одном репозитории");
         return Err(3);
     };
-    let recipe = match oparysh_resolver::PackageSource::recipe(&source, candidate) {
+    target_from_candidate(&source, candidate)
+}
+
+/// Построить [`BuildTarget`] из выбранного кандидата репозитория
+/// (рецепт проверяется при чтении; `dist/`-источник определяется при наличии).
+fn target_from_candidate(
+    source: &RepoPackageSource,
+    candidate: &oparysh_resolver::Candidate,
+) -> Result<BuildTarget, i32> {
+    let recipe = match oparysh_resolver::PackageSource::recipe(source, candidate) {
         Ok(recipe) => recipe,
         Err(e) => {
-            eprintln!("ERROR: не удалось получить рецепт `{dep_name}`: {e}");
+            eprintln!("ERROR: не удалось получить рецепт `{}`: {e}", candidate.name);
             return Err(resolve_exit_code(&e));
         }
     };
@@ -1030,7 +1040,7 @@ fn build_target(target: &str, config: &OparyshConfig, _assume_yes: bool) -> Resu
         .source
         .file
         .as_ref()
-        .and_then(|file| source.dist_file(&candidate, file));
+        .and_then(|file| source.dist_file(candidate, file));
     let raw_toml = toml::to_string(&recipe).unwrap_or_default();
     Ok(BuildTarget {
         name: candidate.name.clone(),
@@ -1039,6 +1049,34 @@ fn build_target(target: &str, config: &OparyshConfig, _assume_yes: bool) -> Resu
         recipe_dir: None,
         repo_dist,
         raw_toml,
+    })
+}
+
+/// Загрузить локальный рецепт (`--file`), вычислив sha256 источника и
+/// проверив его на этапе скачивания (как обычно).
+fn local_recipe_target(path: &Path) -> Result<BuildTarget, i32> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            eprintln!("ERROR: не удалось прочитать {}: {e}", path.display());
+            return Err(1);
+        }
+    };
+    let recipe = match oparysh_core::recipe::Recipe::parse(&raw) {
+        Ok(recipe) => recipe,
+        Err(e) => {
+            eprintln!("ERROR: не удалось разобрать {}: {e}", path.display());
+            return Err(1);
+        }
+    };
+    let recipe_dir = path.parent().map(Path::to_path_buf);
+    Ok(BuildTarget {
+        name: recipe.pkg.name.clone(),
+        version: recipe.pkg.version.clone(),
+        recipe,
+        recipe_dir,
+        repo_dist: None,
+        raw_toml: raw,
     })
 }
 
@@ -1057,6 +1095,19 @@ fn run_build(
     keep_build: bool,
     assume_yes: bool,
 ) {
+    let overrides = parse_overrides(sets, jobs);
+    let config = load_config(None);
+    let target = match build_target(target, &config, assume_yes) {
+        Ok(target) => target,
+        Err(code) => std::process::exit(code),
+    };
+    if let Err(code) = build_package(&config, &target, &overrides, install, strict, keep_build) {
+        std::process::exit(code);
+    }
+}
+
+/// Разобрать `--set k=v` и `--jobs N` в перекрытия (7.7).
+fn parse_overrides(sets: &[String], jobs: Option<u32>) -> oparysh_builder::FlagOverrides {
     let mut overrides = match oparysh_builder::FlagOverrides::parse(sets) {
         Ok(overrides) => overrides,
         Err(e) => {
@@ -1067,13 +1118,21 @@ fn run_build(
     if let Some(jobs) = jobs {
         overrides.jobs = Some(jobs);
     }
+    overrides
+}
 
-    let config = load_config(None);
-    let target = match build_target(target, &config, assume_yes) {
-        Ok(target) => target,
-        Err(code) => std::process::exit(code),
-    };
-    let db = db_dir(&config);
+/// Полный цикл одного пакета: fetch → extract → patches → сборка →
+/// (опционально) установка (8.1–8.4). Возвращает код возврата при ошибке.
+fn build_package(
+    config: &OparyshConfig,
+    target: &BuildTarget,
+    overrides: &oparysh_builder::FlagOverrides,
+    install: bool,
+    strict: bool,
+    keep_build: bool,
+) -> Result<(), i32> {
+    let db = db_dir(config);
+    let target = target;
 
     // 6.1–6.2: кэш/загрузка тарбола.
     let dist: Option<(oparysh_fetcher::RepoBase, String, String)> =
@@ -1106,7 +1165,7 @@ fn run_build(
         Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("ERROR: {e}");
-            std::process::exit(e.exit_code());
+            return Err(e.exit_code());
         }
     };
 
@@ -1120,7 +1179,7 @@ fn run_build(
         Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("ERROR: {e}");
-            std::process::exit(e.exit_code());
+            return Err(e.exit_code());
         }
     };
     if !target.recipe.patches.is_empty() {
@@ -1133,7 +1192,7 @@ fn run_build(
             oparysh_fetcher::apply_patches(&extracted.source_root, &target.recipe.patches, &patch_dir)
         {
             eprintln!("ERROR: {e}");
-            std::process::exit(e.exit_code());
+            return Err(e.exit_code());
         }
     }
 
@@ -1141,15 +1200,15 @@ fn run_build(
     let destdir = oparysh_installer::destdir(&db, &target.name, &target.version);
     if let Err(e) = oparysh_installer::prepare_destdir(&destdir) {
         eprintln!("ERROR: не удалось подготовить {}: {e}", destdir.display());
-        std::process::exit(1);
+        return Err(1);
     }
 
     let plan = match oparysh_builder::build_plan_with(
-        &config,
+        config,
         &target.recipe,
         &extracted.source_root.display().to_string(),
         &destdir.display().to_string(),
-        &overrides,
+        overrides,
     ) {
         Ok(plan) => plan,
         Err(e) => {
@@ -1180,7 +1239,7 @@ fn run_build(
     if let Some(parent) = log_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!("ERROR: не удалось создать {}: {e}", parent.display());
-            std::process::exit(1);
+            return Err(1);
         }
     }
     let log = std::fs::OpenOptions::new()
@@ -1191,7 +1250,7 @@ fn run_build(
         Ok(log) => log,
         Err(e) => {
             eprintln!("ERROR: не удалось открыть {}: {e}", log_path.display());
-            std::process::exit(1);
+            return Err(1);
         }
     };
 
@@ -1200,14 +1259,14 @@ fn run_build(
         Ok(()) => {
             if install {
                 install_built(
-                    &config,
+                    config,
                     &db,
-                    &target,
+                    target,
                     &plan,
                     &oparysh_installer::destdir(&db, &target.name, &target.version),
                     strict,
                     keep_build,
-                );
+                )
             } else {
                 println!(
                     "Готово: {} {} собран, установка не выполнялась (DESTDIR {})",
@@ -1215,11 +1274,12 @@ fn run_build(
                     target.version,
                     oparysh_installer::destdir(&db, &target.name, &target.version).display()
                 );
+                Ok(())
             }
         }
         Err(e) => {
             eprintln!("ERROR: {e}");
-            std::process::exit(oparysh_builder::BUILD_FAILED_EXIT_CODE);
+            Err(oparysh_builder::BUILD_FAILED_EXIT_CODE)
         }
     }
 }
@@ -1235,7 +1295,7 @@ fn install_built(
     destdir: &Path,
     strict: bool,
     keep_build: bool,
-) {
+) -> Result<(), i32> {
     let destroot = PathBuf::from(&config.general.destroot);
     let prefix = target.recipe.build.install.prefix.clone();
     let policy = oparysh_installer::ScanPolicy {
@@ -1246,16 +1306,16 @@ fn install_built(
         Ok(m) => m,
         Err(e) => {
             eprintln!("ERROR: {e}");
-            std::process::exit(e.exit_code());
+            return Err(e.exit_code());
         }
     };
     if manifest.is_empty {
         eprintln!("ERROR: DESTDIR {} пуст — нечего устанавливать", destdir.display());
-        std::process::exit(1);
+        return Err(1);
     }
     if let Err(e) = oparysh_installer::move_to_destroot(&manifest) {
         eprintln!("ERROR: {e}");
-        std::process::exit(e.exit_code());
+        return Err(e.exit_code());
     }
 
     // pkg_hash — sha256 кэшированной копии рецепта (recipes/<n>/<v>/pkg.toml).
@@ -1268,7 +1328,7 @@ fn install_built(
         Ok(p) => p,
         Err(e) => {
             eprintln!("ERROR: {e}");
-            std::process::exit(e.exit_code());
+            return Err(e.exit_code());
         }
     };
     let pkg_hash = oparysh_verifier::sha256_file(&cached).unwrap_or_default();
@@ -1303,7 +1363,7 @@ fn install_built(
         Ok(o) => o,
         Err(e) => {
             eprintln!("ERROR: {e}");
-            std::process::exit(e.exit_code());
+            return Err(e.exit_code());
         }
     };
     println!(
@@ -1331,12 +1391,173 @@ fn install_built(
                 println!("cleanup: build/ сохранён (keep_build)");
             }
             println!("Рецепт: {}", cached.display());
+            Ok(())
         }
         Err(e) => {
             eprintln!("ERROR: {e}");
-            std::process::exit(e.exit_code());
+            Err(e.exit_code())
         }
     }
+}
+
+/// Внедрить локальный рецепт (`--file`) в разрешённый граф как цель:
+/// узел зависит от всех `is_target`-узлов (разрешаемые из репо зависимости,
+/// включая поставщиков виртуальных пакетов), поэтому в топологическом
+/// порядке он окажется последним. Резолвнутые «корневые» узлы перестают
+/// быть целями и получают `required_by = (локальный рецепт, build|run)`,
+/// чтобы план показывал «dep of <рецепт>», а не «target».
+fn inject_local_target(set: &mut oparysh_resolver::RequirementSet, target: &BuildTarget) {
+    let version = oparysh_core::version::Version::parse(&target.version)
+        .unwrap_or_else(|_| oparysh_core::version::Version::parse("0.0.0").expect("0.0.0 parses"));
+    let dep_kind = |raw: &str| oparysh_core::version::DepReq::parse(raw).ok().map(|d| d.name);
+    let build_names: std::collections::HashSet<String> =
+        target.recipe.deps.build.iter().filter_map(|r| dep_kind(r)).collect();
+    let run_names: std::collections::HashSet<String> =
+        target.recipe.deps.run.iter().filter_map(|r| dep_kind(r)).collect();
+
+    let mut dep_nodes: Vec<String> = Vec::new();
+    for node in set.nodes.values_mut().filter(|n| n.is_target) {
+        node.is_target = false;
+        let kind = if build_names.contains(&node.name) {
+            oparysh_resolver::DepKind::Build
+        } else if run_names.contains(&node.name) {
+            oparysh_resolver::DepKind::Run
+        } else {
+            // Поставщик виртуальной зависимости — считаем рантайм-зависимостью.
+            oparysh_resolver::DepKind::Run
+        };
+        node.required_by.push((Some(target.name.clone()), kind));
+        node.required_by.sort();
+        node.required_by.dedup();
+        dep_nodes.push(node.name.clone());
+    }
+    dep_nodes.sort();
+    dep_nodes.dedup();
+    let node = oparysh_resolver::CollectedNode {
+        name: target.name.clone(),
+        version,
+        version_str: target.version.clone(),
+        build: target.recipe.pkg.build,
+        repo: String::new(),
+        as_build: false,
+        as_run: true,
+        is_target: true,
+        installed: false,
+        provided_for: None,
+        required_by: vec![(None, oparysh_resolver::DepKind::Run)],
+        dependencies: dep_nodes,
+        conflicts: Vec::new(),
+    };
+    set.nodes.insert(target.name.clone(), node);
+}
+
+/// Кандидат репозитория из уже собранного узла графа.
+fn candidate_from_node(node: &oparysh_resolver::CollectedNode) -> oparysh_resolver::Candidate {
+    oparysh_resolver::Candidate {
+        name: node.name.clone(),
+        version: node.version.clone(),
+        version_str: node.version_str.clone(),
+        build: node.build,
+        repo: node.repo.clone(),
+    }
+}
+
+/// `oparysh install [pkgs…|--file pkg.toml]` (8.5, 8.6): разрешить
+/// зависимости, показать план, подтвердить и собрать/установить в
+/// топологическом порядке. Build-зависимости устанавливаются для сборки,
+/// но в рантайм-граф (таблица `deps`, rdeps/why/autoremove) не попадают (8.7).
+fn run_install(
+    specs: &[String],
+    file: Option<&Path>,
+    sets: &[String],
+    jobs: Option<u32>,
+    strict: bool,
+    keep_build: bool,
+    assume_yes: bool,
+) {
+    let overrides = parse_overrides(sets, jobs);
+    let config = load_config(None);
+    let (specs, features) = split_plan_args(specs);
+
+    let file_target = file.map(|path| match local_recipe_target(path) {
+        Ok(target) => target,
+        Err(code) => std::process::exit(code),
+    });
+    if file_target.is_none() && specs.is_empty() {
+        eprintln!("ERROR: укажите хотя бы один пакет или --file <pkg.toml>");
+        std::process::exit(2);
+    }
+
+    // Для --file зависимости рецепта резолвим из настроенных репозиториев;
+    // сам локальный рецепт в репозиторий не ходит.
+    let resolve_specs: Vec<String> = match &file_target {
+        Some(target) => {
+            let mut deps: Vec<String> = target
+                .recipe
+                .deps
+                .build
+                .iter()
+                .chain(target.recipe.deps.run.iter())
+                .cloned()
+                .collect();
+            deps.sort();
+            deps.dedup();
+            deps
+        }
+        None => specs,
+    };
+
+    let (mut set, source) = match resolve_cli(&resolve_specs, &features, &config, assume_yes, true) {
+        Ok(value) => value,
+        Err(code) => std::process::exit(code),
+    };
+
+    if let Some(target) = &file_target {
+        if set.nodes.contains_key(&target.name) {
+            eprintln!(
+                "ERROR: пакет {} также присутствует в разрешённом графе; --file для него не поддерживается",
+                target.name
+            );
+            std::process::exit(2);
+        }
+        inject_local_target(&mut set, target);
+    }
+
+    let sizes = source_sizes(&set, &source);
+    let plan = render_plan(&set, config.general.jobs, &sizes);
+    if !confirm_plan(&plan, assume_yes) {
+        println!("Отменено; изменения не внесены");
+        return;
+    }
+
+    let order = oparysh_resolver::pending_build_order(&set);
+    let total = order.len();
+    for (index, name) in order.iter().enumerate() {
+        let label = &set.nodes[name];
+        println!("\n=== [{}/{}] {} {} ===", index + 1, total, label.name, label.version_str);
+        let result = match &file_target {
+            Some(local) if local.name == *name => {
+                build_package(&config, local, &overrides, true, strict, keep_build)
+            }
+            _ => {
+                let node = &set.nodes[name];
+                match target_from_candidate(&source, &candidate_from_node(node)) {
+                    Ok(target) => {
+                        build_package(&config, &target, &overrides, true, strict, keep_build)
+                    }
+                    Err(code) => std::process::exit(code),
+                }
+            }
+        };
+        if let Err(code) = result {
+            eprintln!(
+                "ERROR: установка прервана на пакете {}; ранее установленные пакеты остаются в системе",
+                name
+            );
+            std::process::exit(code);
+        }
+    }
+    println!("\nГотово: установлено пакетов: {total}");
 }
 
 fn main() {
@@ -1456,6 +1677,22 @@ fn main() {
             strict,
             keep_build,
         }) => run_build(&target, &sets, jobs, install, strict, keep_build, assume_yes),
+        Some(Command::Install {
+            specs,
+            file,
+            sets,
+            jobs,
+            strict,
+            keep_build,
+        }) => run_install(
+            &specs,
+            file.as_deref(),
+            &sets,
+            jobs,
+            strict,
+            keep_build,
+            assume_yes,
+        ),
         Some(Command::Repo { action }) => match action {
             RepoCommand::Add { name, target } => match run_repo_add(&name, &target) {
                 Ok(msg) => println!("{msg}"),
