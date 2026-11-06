@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn open_creates_schema_and_migrations() {
         let dir = temp_db_dir();
-        let mut db = Database::open(&dir).unwrap();
+        let db = Database::open(&dir).unwrap();
         assert!(db.get_package("nonexistent").unwrap().is_none());
 
         // Миграция применена — таблица _migrations содержит версию 1

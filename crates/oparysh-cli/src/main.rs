@@ -355,7 +355,7 @@ fn reverse_deps_closure(db: &Database, target: &str) -> oparysh_db::DbResult<Vec
 fn run_deps(spec: &str, tree: bool) {
     let config = load_config(None);
     let specs = [spec.to_string()];
-    match resolve_cli(&specs, &[], &config, false, false) {
+    match resolve_cli(&specs, &[], &config, false, true) {
         Ok((set, _)) => {
             if tree {
                 let root = set
@@ -385,6 +385,7 @@ fn run_deps(spec: &str, tree: bool) {
             let db = open_db(&config);
             let installed = db.get_package(&split_pkg_spec(spec).0).ok().flatten();
             let Some(pkg) = installed else {
+                eprintln!("ERROR: пакет `{spec}` не найден ни в репозиториях, ни среди установленных");
                 std::process::exit(3);
             };
             println!("{} {} (installed; зависимости из БД)", pkg.name, pkg.version);
@@ -2264,7 +2265,7 @@ fn run_downgrade(
         .and_then(|cand| target_from_candidate(&source, &cand))
     {
         Ok(t) => t,
-        Err(repo_code) => {
+        Err(_repo_code) => {
             let cached = db_dir(&config)
                 .join("recipes")
                 .join(pkg)
@@ -2277,7 +2278,7 @@ fn run_downgrade(
                     Err(code) => std::process::exit(code),
                 }
             } else {
-                eprintln!("ERROR: версия `{ver}` пакета `{pkg}` не найдена ни в репозиториях, ни в кэше (код {repo_code})");
+                // exact_candidate уже печатает конкретную причину (нет в репо / ошибка репо).
                 std::process::exit(3);
             }
         }
