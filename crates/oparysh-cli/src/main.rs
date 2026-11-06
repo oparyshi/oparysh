@@ -878,6 +878,51 @@ enum Command {
     },
     /// Удалить пакеты-«сироты»: стояли как зависимости, никому не нужны (stage 9.3)
     Autoremove,
+    /// Обновить все или указанные установленные пакеты (stage 10.1)
+    Upgrade {
+        /// Пакеты для обновления; пусто — все установленные
+        #[arg(value_name = "PKG")]
+        pkgs: Vec<String>,
+        /// Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`
+        #[arg(long = "set", value_name = "K=V")]
+        sets: Vec<String>,
+        /// Перекрыть число заданий сборки
+        #[arg(long = "jobs", value_name = "N")]
+        jobs: Option<u32>,
+        /// Незаявленные файлы (вне install.prefix) = ошибка (stage 8.2)
+        #[arg(long)]
+        strict: bool,
+        /// Не удалять каталог сборки <db_dir>/build/ после установки
+        #[arg(long)]
+        keep_build: bool,
+    },
+    /// Откат пакета на конкретную версию из репо или кэша рецептов (stage 10.2)
+    Downgrade {
+        /// Пакет для отката
+        #[arg(value_name = "PKG")]
+        pkg: String,
+        /// Целевая версия
+        #[arg(value_name = "VER")]
+        ver: String,
+        /// Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`
+        #[arg(long = "set", value_name = "K=V")]
+        sets: Vec<String>,
+        /// Перекрыть число заданий сборки
+        #[arg(long = "jobs", value_name = "N")]
+        jobs: Option<u32>,
+        /// Незаявленные файлы (вне install.prefix) = ошибка (stage 8.2)
+        #[arg(long)]
+        strict: bool,
+        /// Не удалять каталог сборки <db_dir>/build/ после установки
+        #[arg(long)]
+        keep_build: bool,
+    },
+    /// Журнал установок/обновлений/понижений/удалений (stage 10.3)
+    History {
+        /// Ограничить вывод одним пакетом
+        #[arg(value_name = "PKG")]
+        pkg: Option<String>,
+    },
     /// Управление репозиториями в конфиге (stage 4.5)
     Repo {
         #[command(subcommand)]
@@ -1112,7 +1157,7 @@ fn run_build(
         Ok(target) => target,
         Err(code) => std::process::exit(code),
     };
-    if let Err(code) = build_package(&config, &target, &overrides, install, strict, keep_build, oparysh_installer::REASON_EXPLICIT) {
+    if let Err(code) = build_package(&config, &target, &overrides, install, strict, keep_build, oparysh_installer::REASON_EXPLICIT, None, "install", "") {
         std::process::exit(code);
     }
 }
@@ -1142,6 +1187,9 @@ fn build_package(
     strict: bool,
     keep_build: bool,
     reason: &str,
+    build_rev: Option<u32>,
+    event_action: &str,
+    event_detail: &str,
 ) -> Result<(), i32> {
     let db = db_dir(config);
     let target = target;
@@ -1279,6 +1327,9 @@ fn build_package(
                     strict,
                     keep_build,
                     reason,
+                    build_rev,
+                    event_action,
+                    event_detail,
                 )
             } else {
                 println!(
@@ -1309,6 +1360,9 @@ fn install_built(
     strict: bool,
     keep_build: bool,
     reason: &str,
+    build_rev: Option<u32>,
+    event_action: &str,
+    event_detail: &str,
 ) -> Result<(), i32> {
     let destroot = PathBuf::from(&config.general.destroot);
     let prefix = target.recipe.build.install.prefix.clone();
@@ -1366,7 +1420,7 @@ fn install_built(
     };
 
     let mut database = open_db(config);
-    let outcome = match oparysh_installer::commit_package(
+    let outcome = match oparysh_installer::commit_package_with_build_rev(
         &mut database,
         &target.recipe,
         &manifest,
@@ -1374,6 +1428,7 @@ fn install_built(
         &build_record,
         &pkg_hash,
         reason,
+        build_rev,
     ) {
         Ok(o) => o,
         Err(e) => {
@@ -1381,10 +1436,20 @@ fn install_built(
             return Err(e.exit_code());
         }
     };
+    if let Err(e) = database.record_event(
+        event_action,
+        &outcome.name,
+        &outcome.version,
+        outcome.build_rev,
+        event_detail,
+    ) {
+        eprintln!("WARN: не удалось записать событие в журнал: {e}");
+    }
     println!(
-        "Установлено: {} {} — файлов {}, {} байт (destroot {})",
+        "Установлено: {} {} (build {}) — файлов {}, {} байт (destroot {})",
         outcome.name,
         outcome.version,
+        outcome.build_rev,
         outcome.files,
         outcome.size_bytes,
         destroot.display()
@@ -1557,13 +1622,13 @@ fn run_install(
         };
         let result = match &file_target {
             Some(local) if local.name == *name => {
-                build_package(&config, local, &overrides, true, strict, keep_build, reason)
+                build_package(&config, local, &overrides, true, strict, keep_build, reason, None, "install", "")
             }
             _ => {
                 let node = &set.nodes[name];
                 match target_from_candidate(&source, &candidate_from_node(node)) {
                     Ok(target) => {
-                        build_package(&config, &target, &overrides, true, strict, keep_build, reason)
+                        build_package(&config, &target, &overrides, true, strict, keep_build, reason, None, "install", "")
                     }
                     Err(code) => std::process::exit(code),
                 }
@@ -1625,6 +1690,9 @@ fn run_remove(pkgs: &[String], force: bool) {
     for name in pkgs {
         match oparysh_installer::remove_package(&mut db, &db_dir, &destroot, name, force) {
             Ok(outcome) => {
+                if let Err(e) = db.record_event("remove", &outcome.name, &outcome.version, 0, "") {
+                    eprintln!("WARN: не удалось записать событие в журнал: {e}");
+                }
                 println!(
                     "Удалён: {} {} — файлов удалено: {}{}",
                     outcome.name,
@@ -1687,6 +1755,9 @@ fn run_autoremove(assume_yes: bool) {
     match oparysh_installer::autoremove(&mut db, &db_dir, &destroot) {
         Ok(outcomes) => {
             for outcome in &outcomes {
+                if let Err(e) = db.record_event("autoremove", &outcome.name, &outcome.version, 0, "") {
+                    eprintln!("WARN: не удалось записать событие в журнал: {e}");
+                }
                 println!(
                     "Удалён: {} {} — файлов удалено: {}",
                     outcome.name, outcome.version, outcome.files_removed
@@ -1698,6 +1769,399 @@ fn run_autoremove(assume_yes: bool) {
             eprintln!("ERROR: {e}");
             std::process::exit(e.exit_code());
         }
+    }
+}
+
+/// Лучший кандидат репозитория для имени (последняя удовлетворяющая версия).
+fn latest_candidate(
+    source: &RepoPackageSource,
+    name: &str,
+) -> Result<oparysh_resolver::Candidate, i32> {
+    let dep = oparysh_core::version::DepReq::parse(name).map_err(|e| {
+        eprintln!("ERROR: {e}");
+        2
+    })?;
+    let candidates = match oparysh_resolver::PackageSource::candidates(source, name) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            return Err(resolve_exit_code(&e));
+        }
+    };
+    oparysh_resolver::select_latest_satisfying(&candidates, &dep)
+        .cloned()
+        .ok_or_else(|| {
+            eprintln!("ERROR: пакет `{name}` не найден ни в одном репозитории");
+            3
+        })
+}
+
+/// Кандидат репозитория с точной версией.
+fn exact_candidate(
+    source: &RepoPackageSource,
+    name: &str,
+    version: &str,
+) -> Result<oparysh_resolver::Candidate, i32> {
+    let candidates = match oparysh_resolver::PackageSource::candidates(source, name) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            return Err(resolve_exit_code(&e));
+        }
+    };
+    candidates
+        .into_iter()
+        .find(|c| c.version_str == version)
+        .ok_or_else(|| {
+            eprintln!("ERROR: версия `{version}` пакета `{name}` не найдена ни в одном репозитории");
+            3
+        })
+}
+
+/// Топологический порядок пересборки для множества пакетов: зависимости
+/// (по установленному графу `deps`) собираются раньше зависимых.
+fn rebuild_order(db: &Database, set: &HashSet<String>) -> Vec<String> {
+    let mut in_degree: std::collections::BTreeMap<String, usize> =
+        set.iter().map(|n| (n.clone(), 0)).collect();
+    let mut dependents: std::collections::BTreeMap<String, Vec<String>> =
+        set.iter().map(|n| (n.clone(), Vec::new())).collect();
+    for name in set {
+        if let Ok(deps) = db.get_deps(name) {
+            for dep in deps {
+                if set.contains(&dep.dep_name) {
+                    *in_degree.entry(name.clone()).or_insert(0) += 1;
+                    dependents
+                        .entry(dep.dep_name.clone())
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+        }
+    }
+    let mut queue: std::collections::VecDeque<String> = in_degree
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(n, _)| n.clone())
+        .collect();
+    let mut order = Vec::with_capacity(set.len());
+    while let Some(name) = queue.pop_front() {
+        order.push(name.clone());
+        if let Some(list) = dependents.get(&name) {
+            for dep_name in list {
+                if let Some(d) = in_degree.get_mut(dep_name) {
+                    *d -= 1;
+                    if *d == 0 {
+                        queue.push_back(dep_name.clone());
+                    }
+                }
+            }
+        }
+    }
+    // Цикл (runtime-цикл в установленном графе): дописать остаток в стабильном порядке.
+    if order.len() < set.len() {
+        let mut rest: Vec<String> = set.iter().filter(|n| !order.contains(n)).cloned().collect();
+        rest.sort();
+        order.extend(rest);
+    }
+    order
+}
+
+/// `oparysh upgrade [pkg…]` (10.1): перерезолвинг установленных пакетов.
+/// Пакет обновляется, если в репозитории есть версия новее установленной;
+/// пакеты, зависящие от обновлённых/пересобранных, пересобираются с +1 к build.
+#[allow(clippy::too_many_arguments)]
+fn run_upgrade(
+    pkgs: &[String],
+    sets: &[String],
+    jobs: Option<u32>,
+    strict: bool,
+    keep_build: bool,
+    assume_yes: bool,
+) {
+    let overrides = parse_overrides(sets, jobs);
+    let config = load_config(None);
+    let db = open_db(&config);
+
+    let installed = match db.list_packages() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(8);
+        }
+    };
+    if installed.is_empty() {
+        println!("нет установленных пакетов");
+        return;
+    }
+
+    // Цели: явно указанные пакеты (должны быть установлены) или все установленные.
+    let targets: Vec<Package> = if pkgs.is_empty() {
+        installed.clone()
+    } else {
+        let mut out = Vec::with_capacity(pkgs.len());
+        for name in pkgs {
+            match installed.iter().find(|p| &p.name == name) {
+                Some(p) => out.push(p.clone()),
+                None => {
+                    eprintln!("ERROR: пакет `{name}` не установлен");
+                    std::process::exit(3);
+                }
+            }
+        }
+        out
+    };
+
+    let source = match RepoPackageSource::new(&config.repositories.entries, &cache_dir(&config)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(resolve_exit_code(&e));
+        }
+    };
+
+    // Какие из целей имеют более свежую версию в репозитории?
+    let mut upgrade_to: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for target in &targets {
+        match latest_candidate(&source, &target.name) {
+            Ok(candidate) => {
+                let cur = oparysh_core::version::Version::parse(&target.version).ok();
+                let new = oparysh_core::version::Version::parse(&candidate.version_str).ok();
+                if let (Some(cur), Some(new)) = (cur, new) {
+                    if new > cur {
+                        upgrade_to.insert(target.name.clone(), candidate.version_str.clone());
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("WARN: пакет `{}` не найден ни в одном репозитории; пропущен", target.name);
+            }
+        }
+    }
+
+    // Замыкание: всё, что (транзитивно) зависит от обновляемых, пересобирается.
+    let mut rebuild: HashSet<String> = upgrade_to.keys().cloned().collect();
+    loop {
+        let mut grew = false;
+        for p in &installed {
+            if rebuild.contains(&p.name) {
+                continue;
+            }
+            if let Ok(deps) = db.get_deps(&p.name) {
+                if deps.iter().any(|d| rebuild.contains(&d.dep_name)) {
+                    rebuild.insert(p.name.clone());
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    if rebuild.is_empty() {
+        println!("все установленные пакеты актуальны");
+        return;
+    }
+
+    let order = rebuild_order(&db, &rebuild);
+    let installed_map: std::collections::BTreeMap<&str, &Package> =
+        installed.iter().map(|p| (p.name.as_str(), p)).collect();
+
+    // План до начала работ.
+    let mut plan = String::from("Будут обновлены/пересобраны пакеты:\n");
+    for name in &order {
+        let cur = installed_map[name.as_str()];
+        match upgrade_to.get(name) {
+            Some(new_ver) => plan.push_str(&format!(
+                "  - {name} {old} -> {new_ver}\n",
+                old = cur.version
+            )),
+            None => plan.push_str(&format!(
+                "  - {name} {ver} (пересборка, build {b} -> {next})\n",
+                ver = cur.version,
+                b = cur.build_rev,
+                next = cur.build_rev + 1
+            )),
+        }
+    }
+    if !confirm_plan(plan.trim_end(), assume_yes) {
+        println!("Отменено; изменения не внесены");
+        return;
+    }
+
+    drop(db);
+    let config = load_config(None);
+    for (index, name) in order.iter().enumerate() {
+        let cur = installed_map[name.as_str()];
+        let new_version = upgrade_to.get(name).cloned().unwrap_or_else(|| cur.version.clone());
+        let same_version = new_version == cur.version;
+        let build_rev = if same_version { Some(cur.build_rev + 1) } else { None };
+        let reason = cur.reason.clone();
+        let action = "upgrade";
+        let detail = format!("{} -> {}", cur.version, new_version);
+
+        println!(
+            "\n=== [{}/{}] {} {} ===",
+            index + 1,
+            order.len(),
+            name,
+            new_version,
+        );
+        let target = match exact_candidate(&source, name, &new_version)
+            .and_then(|cand| target_from_candidate(&source, &cand))
+        {
+            Ok(t) => t,
+            Err(code) => std::process::exit(code),
+        };
+        if let Err(code) = build_package(
+            &config,
+            &target,
+            &overrides,
+            true,
+            strict,
+            keep_build,
+            &reason,
+            build_rev,
+            action,
+            &detail,
+        ) {
+            eprintln!(
+                "ERROR: обновление прервано на пакете {name}; ранее установленные пакеты остаются в системе"
+            );
+            std::process::exit(code);
+        }
+    }
+    println!("\nГотово: обработано пакетов: {}", order.len());
+}
+
+/// `oparysh downgrade <pkg> <ver>` (10.2): откат на конкретную версию из
+/// репозитория; если её там нет — из кэша рецептов `<db_dir>/recipes/<n>/<ver>/`.
+fn run_downgrade(
+    pkg: &str,
+    ver: &str,
+    sets: &[String],
+    jobs: Option<u32>,
+    strict: bool,
+    keep_build: bool,
+    assume_yes: bool,
+) {
+    let overrides = parse_overrides(sets, jobs);
+    let config = load_config(None);
+    let db = open_db(&config);
+
+    let installed = match db.get_package(pkg) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            eprintln!("ERROR: пакет `{pkg}` не установлен");
+            std::process::exit(3);
+        }
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(8);
+        }
+    };
+    if installed.version == ver {
+        println!("пакет `{pkg}` уже на версии {ver}");
+        return;
+    }
+
+    let source = match RepoPackageSource::new(&config.repositories.entries, &cache_dir(&config)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(resolve_exit_code(&e));
+        }
+    };
+
+    // Репозиторий в приоритете, кэш рецептов — как запасной вариант.
+    let target = match exact_candidate(&source, pkg, ver)
+        .and_then(|cand| target_from_candidate(&source, &cand))
+    {
+        Ok(t) => t,
+        Err(repo_code) => {
+            let cached = db_dir(&config)
+                .join("recipes")
+                .join(pkg)
+                .join(ver)
+                .join("pkg.toml");
+            if cached.is_file() {
+                eprintln!("WARN: версия {ver} не найдена в репозиториях; использую кэш {}", cached.display());
+                match local_recipe_target(&cached) {
+                    Ok(t) => t,
+                    Err(code) => std::process::exit(code),
+                }
+            } else {
+                eprintln!("ERROR: версия `{ver}` пакета `{pkg}` не найдена ни в репозиториях, ни в кэше (код {repo_code})");
+                std::process::exit(3);
+            }
+        }
+    };
+
+    let plan = format!(
+        "Будет выполнен откат: {pkg} {old} -> {ver}",
+        old = installed.version
+    );
+    if !confirm_plan(&plan, assume_yes) {
+        println!("Отменено; изменения не внесены");
+        return;
+    }
+
+    drop(db);
+    let reason = installed.reason.clone();
+    let build_rev = if installed.version == ver {
+        Some(installed.build_rev + 1)
+    } else {
+        None
+    };
+    let detail = format!("{} -> {}", installed.version, ver);
+    if let Err(code) = build_package(
+        &config,
+        &target,
+        &overrides,
+        true,
+        strict,
+        keep_build,
+        &reason,
+        build_rev,
+        "downgrade",
+        &detail,
+    ) {
+        std::process::exit(code);
+    }
+}
+
+/// `oparysh history [pkg]` (10.3): журнал событий из таблицы `events`.
+fn run_history(pkg: Option<&str>) {
+    let config = load_config(None);
+    let db = open_db(&config);
+    let events = match db.list_events(pkg) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(8);
+        }
+    };
+    if events.is_empty() {
+        match pkg {
+            Some(name) => println!("нет событий для пакета `{name}`"),
+            None => println!("журнал пуст"),
+        }
+        return;
+    }
+    println!(
+        "{time:<12} {action:<11} {pkg:<24} {version:<12} {build:>5}  ДЕТАЛИ",
+        time = "ВРЕМЯ", action = "ДЕЙСТВИЕ", pkg = "ПАКЕТ", version = "ВЕРСИЯ", build = "BUILD"
+    );
+    for e in &events {
+        println!(
+            "{:<12} {:<11} {:<24} {:<12} {:>5}  {}",
+            format_date_utc(e.ts.max(0) as u64),
+            e.action,
+            e.pkg,
+            e.version,
+            e.build_rev,
+            e.detail
+        );
     }
 }
 
@@ -1836,6 +2300,13 @@ fn main() {
         ),
         Some(Command::Remove { pkgs, force }) => run_remove(&pkgs, force),
         Some(Command::Autoremove) => run_autoremove(assume_yes),
+        Some(Command::Upgrade { pkgs, sets, jobs, strict, keep_build }) => {
+            run_upgrade(&pkgs, &sets, jobs, strict, keep_build, assume_yes)
+        }
+        Some(Command::Downgrade { pkg, ver, sets, jobs, strict, keep_build }) => {
+            run_downgrade(&pkg, &ver, &sets, jobs, strict, keep_build, assume_yes)
+        }
+        Some(Command::History { pkg }) => run_history(pkg.as_deref()),
         Some(Command::Repo { action }) => match action {
             RepoCommand::Add { name, target } => match run_repo_add(&name, &target) {
                 Ok(msg) => println!("{msg}"),

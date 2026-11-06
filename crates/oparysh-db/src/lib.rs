@@ -9,7 +9,7 @@ pub mod db;
 pub mod error;
 pub mod lock;
 
-pub use db::{BuildInfo, Database, Dep, FileEntry, Package};
+pub use db::{BuildInfo, Database, Dep, Event, FileEntry, Package};
 pub use error::{DbError, DbResult};
 pub use lock::AdvisoryLock;
 pub use db::rebuild_db_from_backup;

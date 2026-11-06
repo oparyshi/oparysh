@@ -281,6 +281,7 @@ pub struct DepSnapshot {
 pub struct CommitOutcome {
     pub name: String,
     pub version: String,
+    pub build_rev: u32,
     pub files: usize,
     pub size_bytes: i64,
 }
@@ -341,6 +342,23 @@ pub fn commit_package(
     pkg_hash: &str,
     reason: &str,
 ) -> Result<CommitOutcome, InstallError> {
+    commit_package_with_build_rev(db, recipe, manifest, deps, build, pkg_hash, reason, None)
+}
+
+/// Вариант [`commit_package`] с явным `build_rev` (этапы 10.1/10.2):
+/// при пересборке той же версии `build_rev` увеличивается (+1), при
+/// смене версии берётся `recipe.pkg.build`. `None` — как обычно, из рецепта.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_package_with_build_rev(
+    db: &mut Database,
+    recipe: &Recipe,
+    manifest: &Manifest,
+    deps: &DepSnapshot,
+    build: &BuildRecord,
+    pkg_hash: &str,
+    reason: &str,
+    build_rev: Option<u32>,
+) -> Result<CommitOutcome, InstallError> {
     let name = recipe.pkg.name.clone();
 
     let mut dep_rows: Vec<Dep> = Vec::with_capacity(deps.run.len());
@@ -368,7 +386,7 @@ pub fn commit_package(
     let pkg = Package {
         name: name.clone(),
         version: recipe.pkg.version.clone(),
-        build_rev: recipe.pkg.build,
+        build_rev: build_rev.unwrap_or(recipe.pkg.build),
         arch: recipe.pkg.arch.first().cloned().unwrap_or_else(|| "any".to_string()),
         pkg_hash: pkg_hash.to_string(),
         install_ts: now_ts(),
@@ -380,6 +398,7 @@ pub fn commit_package(
     Ok(CommitOutcome {
         name: pkg.name,
         version: pkg.version,
+        build_rev: pkg.build_rev,
         files: manifest.files.len(),
         size_bytes: pkg.size_bytes,
     })

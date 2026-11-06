@@ -71,6 +71,20 @@ const MIGRATION_2: &str = r#"
 ALTER TABLE packages ADD COLUMN reason TEXT NOT NULL DEFAULT 'explicit';
 "#;
 
+/// Миграция 3 (этап 10.3): журнал событий — установки/обновления/понижения/удаления.
+const MIGRATION_3: &str = r#"
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          INTEGER NOT NULL,
+    action      TEXT NOT NULL,       -- install | upgrade | downgrade | remove | autoremove
+    pkg         TEXT NOT NULL,
+    version     TEXT NOT NULL,
+    build_rev   INTEGER NOT NULL DEFAULT 0,
+    detail      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_events_pkg ON events(pkg);
+"#;
+
 /// Установленный пакет (таблица `packages`).
 #[derive(Debug, Clone)]
 pub struct Package {
@@ -99,6 +113,19 @@ pub struct Dep {
     pub pkg: String,
     pub dep_name: String,
     pub req: String,
+}
+
+/// Запись журнала событий (таблица `events`, этап 10.3).
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub id: i64,
+    pub ts: i64,
+    /// install | upgrade | downgrade | remove | autoremove
+    pub action: String,
+    pub pkg: String,
+    pub version: String,
+    pub build_rev: u32,
+    pub detail: String,
 }
 
 /// Информация о сборке (таблица `build_info`).
@@ -183,6 +210,22 @@ impl Database {
             self.conn
                 .execute(
                     "INSERT INTO _migrations (version, applied_at) VALUES (2, ?1)",
+                    params![now_ts()],
+                )
+                .map_err(DbError::Sqlite)?;
+        }
+
+        // Миграция 3: таблица events (этап 10.3).
+        let applied3: Option<i64> = self
+            .conn
+            .query_row("SELECT version FROM _migrations WHERE version = 3", [], |r| r.get(0))
+            .optional()
+            .map_err(DbError::Sqlite)?;
+        if applied3.is_none() {
+            self.conn.execute_batch(MIGRATION_3).map_err(DbError::Sqlite)?;
+            self.conn
+                .execute(
+                    "INSERT INTO _migrations (version, applied_at) VALUES (3, ?1)",
                     params![now_ts()],
                 )
                 .map_err(DbError::Sqlite)?;
@@ -424,6 +467,61 @@ impl Database {
         let mut out = Vec::new();
         for row in rows {
             out.push(row.map_err(DbError::Sqlite)?);
+        }
+        Ok(out)
+    }
+
+    // ━━━━━━━━━━━━━━━ DAO: events (этап 10.3) ━━━━━━━━━━━━━━━
+
+    /// Записать событие в журнал (`events`).
+    pub fn record_event(
+        &self,
+        action: &str,
+        pkg: &str,
+        version: &str,
+        build_rev: u32,
+        detail: &str,
+    ) -> DbResult<()> {
+        self.conn.execute(
+            "INSERT INTO events (ts, action, pkg, version, build_rev, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now_ts(), action, pkg, version, build_rev as i64, detail],
+        )?;
+        Ok(())
+    }
+
+    /// Прочитать журнал событий: все (`pkg = None`) или по одному пакету,
+    /// от новых к старым.
+    pub fn list_events(&self, pkg: Option<&str>) -> DbResult<Vec<Event>> {
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Event> {
+            Ok(Event {
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                action: row.get(2)?,
+                pkg: row.get(3)?,
+                version: row.get(4)?,
+                build_rev: row.get::<_, i64>(5)? as u32,
+                detail: row.get(6)?,
+            })
+        };
+        let mut out = Vec::new();
+        match pkg {
+            Some(name) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, ts, action, pkg, version, build_rev, detail
+                     FROM events WHERE pkg = ?1 ORDER BY id DESC",
+                ).map_err(DbError::Sqlite)?;
+                let rows = stmt.query_map(params![name], map_row).map_err(DbError::Sqlite)?;
+                for row in rows { out.push(row.map_err(DbError::Sqlite)?); }
+            }
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, ts, action, pkg, version, build_rev, detail
+                     FROM events ORDER BY id DESC",
+                ).map_err(DbError::Sqlite)?;
+                let rows = stmt.query_map([], map_row).map_err(DbError::Sqlite)?;
+                for row in rows { out.push(row.map_err(DbError::Sqlite)?); }
+            }
         }
         Ok(out)
     }
