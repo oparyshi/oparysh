@@ -441,7 +441,7 @@ fn orphaned_packages(db: &Database) -> oparysh_db::DbResult<Vec<Package>> {
     }
     Ok(pkgs
         .into_iter()
-        .filter(|p| !needed.contains(&p.name))
+        .filter(|p| p.reason == oparysh_installer::REASON_DEPENDENCY && !needed.contains(&p.name))
         .collect())
 }
 
@@ -867,6 +867,17 @@ enum Command {
         #[arg(long)]
         keep_build: bool,
     },
+    /// Удалить установленные пакеты по манифесту файлов (stage 9.1–9.4)
+    Remove {
+        /// Пакеты для удаления
+        #[arg(value_name = "PKG", required = true)]
+        pkgs: Vec<String>,
+        /// Удалить даже при установленных обратных зависимостях (код 9 без флага)
+        #[arg(long)]
+        force: bool,
+    },
+    /// Удалить пакеты-«сироты»: стояли как зависимости, никому не нужны (stage 9.3)
+    Autoremove,
     /// Управление репозиториями в конфиге (stage 4.5)
     Repo {
         #[command(subcommand)]
@@ -1101,7 +1112,7 @@ fn run_build(
         Ok(target) => target,
         Err(code) => std::process::exit(code),
     };
-    if let Err(code) = build_package(&config, &target, &overrides, install, strict, keep_build) {
+    if let Err(code) = build_package(&config, &target, &overrides, install, strict, keep_build, oparysh_installer::REASON_EXPLICIT) {
         std::process::exit(code);
     }
 }
@@ -1130,6 +1141,7 @@ fn build_package(
     install: bool,
     strict: bool,
     keep_build: bool,
+    reason: &str,
 ) -> Result<(), i32> {
     let db = db_dir(config);
     let target = target;
@@ -1266,6 +1278,7 @@ fn build_package(
                     &oparysh_installer::destdir(&db, &target.name, &target.version),
                     strict,
                     keep_build,
+                    reason,
                 )
             } else {
                 println!(
@@ -1295,6 +1308,7 @@ fn install_built(
     destdir: &Path,
     strict: bool,
     keep_build: bool,
+    reason: &str,
 ) -> Result<(), i32> {
     let destroot = PathBuf::from(&config.general.destroot);
     let prefix = target.recipe.build.install.prefix.clone();
@@ -1359,6 +1373,7 @@ fn install_built(
         &deps,
         &build_record,
         &pkg_hash,
+        reason,
     ) {
         Ok(o) => o,
         Err(e) => {
@@ -1535,15 +1550,20 @@ fn run_install(
     for (index, name) in order.iter().enumerate() {
         let label = &set.nodes[name];
         println!("\n=== [{}/{}] {} {} ===", index + 1, total, label.name, label.version_str);
+        let reason = if set.nodes[name].is_target {
+            oparysh_installer::REASON_EXPLICIT
+        } else {
+            oparysh_installer::REASON_DEPENDENCY
+        };
         let result = match &file_target {
             Some(local) if local.name == *name => {
-                build_package(&config, local, &overrides, true, strict, keep_build)
+                build_package(&config, local, &overrides, true, strict, keep_build, reason)
             }
             _ => {
                 let node = &set.nodes[name];
                 match target_from_candidate(&source, &candidate_from_node(node)) {
                     Ok(target) => {
-                        build_package(&config, &target, &overrides, true, strict, keep_build)
+                        build_package(&config, &target, &overrides, true, strict, keep_build, reason)
                     }
                     Err(code) => std::process::exit(code),
                 }
@@ -1558,6 +1578,127 @@ fn run_install(
         }
     }
     println!("\nГотово: установлено пакетов: {total}");
+}
+
+/// `oparysh remove <pkg…> [--force]` (9.1–9.4): удалить пакеты по манифесту.
+/// Сначала проверяются все цели (установлены ли, нет ли обратных зависимостей),
+/// чтобы при отказе (код 9) ничего не было удалено.
+fn run_remove(pkgs: &[String], force: bool) {
+    let config = load_config(None);
+    let db_dir = db_dir(&config);
+    let destroot = PathBuf::from(&config.general.destroot);
+    let mut db = open_db(&config);
+
+    // Фаза 1: валидация всех целей до каких-либо изменений.
+    for name in pkgs {
+        match db.get_package(name) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                eprintln!("ERROR: пакет `{name}` не установлен");
+                std::process::exit(3);
+            }
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(8);
+            }
+        }
+        if !force {
+            match db.reverse_deps(name) {
+                Ok(rdeps) if !rdeps.is_empty() => {
+                    eprintln!(
+                        "ERROR: отказ: пакет `{name}` нужен установленным пакетам: {}",
+                        rdeps.join(", ")
+                    );
+                    eprintln!("используйте `oparysh remove --force {name}` для принудительного удаления");
+                    std::process::exit(9);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(8);
+                }
+            }
+        }
+    }
+
+    // Фаза 2: удаление.
+    for name in pkgs {
+        match oparysh_installer::remove_package(&mut db, &db_dir, &destroot, name, force) {
+            Ok(outcome) => {
+                println!(
+                    "Удалён: {} {} — файлов удалено: {}{}",
+                    outcome.name,
+                    outcome.version,
+                    outcome.files_removed,
+                    if outcome.missing.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", отсутствовало на диске: {}", outcome.missing.len())
+                    }
+                );
+                if !outcome.forced_rdeps.is_empty() {
+                    println!(
+                        "WARN: --force: оставлены установленные обратные зависимости: {}",
+                        outcome.forced_rdeps.join(", ")
+                    );
+                }
+                if !outcome.missing.is_empty() {
+                    for path in &outcome.missing {
+                        eprintln!("WARN: файл из манифеста отсутствовал: {path}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(e.exit_code());
+            }
+        }
+    }
+}
+
+/// `oparysh autoremove` (9.3): удалить пакеты-сироты (установлены как
+/// зависимости, никому из установленных не нужны). Запрашивает подтверждение,
+/// если не передано `--yes`.
+fn run_autoremove(assume_yes: bool) {
+    let config = load_config(None);
+    let db_dir = db_dir(&config);
+    let destroot = PathBuf::from(&config.general.destroot);
+    let mut db = open_db(&config);
+
+    let candidates = match oparysh_installer::autoremove_candidates(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
+        }
+    };
+    if candidates.is_empty() {
+        println!("сирот не найдено");
+        return;
+    }
+    let mut plan = String::from("Будут удалены пакеты-сироты:\n");
+    for name in &candidates {
+        plan.push_str(&format!("  - {name}\n"));
+    }
+    if !confirm_plan(plan.trim_end(), assume_yes) {
+        println!("Отменено; изменения не внесены");
+        return;
+    }
+    match oparysh_installer::autoremove(&mut db, &db_dir, &destroot) {
+        Ok(outcomes) => {
+            for outcome in &outcomes {
+                println!(
+                    "Удалён: {} {} — файлов удалено: {}",
+                    outcome.name, outcome.version, outcome.files_removed
+                );
+            }
+            println!("Готово: удалено пакетов: {}", outcomes.len());
+        }
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
+        }
+    }
 }
 
 fn main() {
@@ -1693,6 +1834,8 @@ fn main() {
             keep_build,
             assume_yes,
         ),
+        Some(Command::Remove { pkgs, force }) => run_remove(&pkgs, force),
+        Some(Command::Autoremove) => run_autoremove(assume_yes),
         Some(Command::Repo { action }) => match action {
             RepoCommand::Add { name, target } => match run_repo_add(&name, &target) {
                 Ok(msg) => println!("{msg}"),

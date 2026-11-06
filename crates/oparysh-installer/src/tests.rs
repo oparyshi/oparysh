@@ -139,7 +139,7 @@ fn scan_and_commit_to_temp_root() {
     };
     // pkg_hash рецепта — sha256 сырца рецепта.
     let pkg_hash = hex_sha(RECIPE.as_bytes());
-    let out = commit_package(&mut database, &recipe, &manifest, &deps, &build, &pkg_hash).unwrap();
+    let out = commit_package(&mut database, &recipe, &manifest, &deps, &build, &pkg_hash, "explicit").unwrap();
     assert_eq!(out.name, "hello");
     assert_eq!(out.files, 3);
 
@@ -185,10 +185,10 @@ fn commit_package_reinstall_replaces() {
     let mut database = Database::open(&db).unwrap();
     let deps = dep_snapshot();
     let build = BuildRecord::default();
-    commit_package(&mut database, &recipe, &manifest, &deps, &build, "h1").unwrap();
+    commit_package(&mut database, &recipe, &manifest, &deps, &build, "h1", "explicit").unwrap();
     // «Переустановка»: тот же пакет, другие данные — строки должны
     // перезаписаться одной транзакцией, без дублей.
-    let out = commit_package(&mut database, &recipe, &manifest, &deps, &build, "h2").unwrap();
+    let out = commit_package(&mut database, &recipe, &manifest, &deps, &build, "h2", "explicit").unwrap();
     assert_eq!(out.files, manifest.files.len());
     let files = database.get_files("hello").unwrap();
     assert_eq!(files.len(), manifest.files.len()); // нет дублей

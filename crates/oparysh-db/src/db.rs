@@ -13,9 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Текущая версия схемы БД.
-const SCHEMA_VERSION: u32 = 1;
-
 /// Путь по умолчанию к файлу advisory-lock.
 const DEFAULT_LOCK_NAME: &str = "lock";
 
@@ -68,6 +65,12 @@ CREATE TABLE IF NOT EXISTS _migrations (
 );
 "#;
 
+/// Миграция 2 (этап 9.3): причина установки пакета — `explicit` (установлен
+/// явно) или `dependency` (поставлен как зависимость). Нужна для `autoremove`.
+const MIGRATION_2: &str = r#"
+ALTER TABLE packages ADD COLUMN reason TEXT NOT NULL DEFAULT 'explicit';
+"#;
+
 /// Установленный пакет (таблица `packages`).
 #[derive(Debug, Clone)]
 pub struct Package {
@@ -78,6 +81,8 @@ pub struct Package {
     pub pkg_hash: String,
     pub install_ts: i64,
     pub size_bytes: i64,
+    /// Причина установки: `explicit` или `dependency` (этап 9.3, autoremove).
+    pub reason: String,
 }
 
 /// Файл пакета (таблица `files`).
@@ -153,14 +158,35 @@ impl Database {
     fn run_migrations(&mut self) -> DbResult<()> {
         // Все таблицы используют IF NOT EXISTS, поэтому повторный вызов безопасен.
         self.conn.execute_batch(MIGRATION_1).map_err(DbError::Sqlite)?;
-
-        // Отмечаем версию схемы (INSERT OR IGNORE — идемпотентно).
         self.conn
             .execute(
-                "INSERT OR IGNORE INTO _migrations (version, applied_at) VALUES (?1, ?2)",
-                params![SCHEMA_VERSION, now_ts()],
+                "INSERT OR IGNORE INTO _migrations (version, applied_at) VALUES (1, ?1)",
+                params![now_ts()],
             )
             .map_err(DbError::Sqlite)?;
+
+        // Миграция 2: колонка packages.reason (этап 9.3).
+        let applied2: Option<i64> = self
+            .conn
+            .query_row("SELECT version FROM _migrations WHERE version = 2", [], |r| r.get(0))
+            .optional()
+            .map_err(DbError::Sqlite)?;
+        if applied2.is_none() {
+            let has_reason: bool = self
+                .conn
+                .prepare("SELECT reason FROM packages LIMIT 0")
+                .map(|_| true)
+                .unwrap_or(false);
+            if !has_reason {
+                self.conn.execute_batch(MIGRATION_2).map_err(DbError::Sqlite)?;
+            }
+            self.conn
+                .execute(
+                    "INSERT INTO _migrations (version, applied_at) VALUES (2, ?1)",
+                    params![now_ts()],
+                )
+                .map_err(DbError::Sqlite)?;
+        }
 
         Ok(())
     }
@@ -170,8 +196,8 @@ impl Database {
     /// Вставить новый пакет.
     pub fn insert_package(&mut self, pkg: &Package) -> DbResult<()> {
         self.conn.execute(
-            "INSERT INTO packages (name, version, build_rev, arch, pkg_hash, install_ts, size_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO packages (name, version, build_rev, arch, pkg_hash, install_ts, size_bytes, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 pkg.name,
                 pkg.version,
@@ -180,6 +206,7 @@ impl Database {
                 pkg.pkg_hash,
                 pkg.install_ts,
                 pkg.size_bytes,
+                pkg.reason,
             ],
         )?;
         Ok(())
@@ -190,7 +217,7 @@ impl Database {
         let row = self
             .conn
             .query_row(
-                "SELECT name, version, build_rev, arch, pkg_hash, install_ts, size_bytes
+                "SELECT name, version, build_rev, arch, pkg_hash, install_ts, size_bytes, reason
                  FROM packages WHERE name = ?1",
                 params![name],
                 |row| {
@@ -202,6 +229,7 @@ impl Database {
                         pkg_hash: row.get(4)?,
                         install_ts: row.get(5)?,
                         size_bytes: row.get(6)?,
+                        reason: row.get(7)?,
                     })
                 },
             )
@@ -215,7 +243,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT name, version, build_rev, arch, pkg_hash, install_ts, size_bytes
+                "SELECT name, version, build_rev, arch, pkg_hash, install_ts, size_bytes, reason
                  FROM packages ORDER BY name",
             )
             .map_err(DbError::Sqlite)?;
@@ -230,6 +258,7 @@ impl Database {
                     pkg_hash: row.get(4)?,
                     install_ts: row.get(5)?,
                     size_bytes: row.get(6)?,
+                    reason: row.get(7)?,
                 })
             })
             .map_err(DbError::Sqlite)?;
@@ -265,8 +294,8 @@ impl Database {
         tx.execute("DELETE FROM packages WHERE name = ?1", params![pkg.name])
             .map_err(DbError::Sqlite)?;
         tx.execute(
-            "INSERT INTO packages (name, version, build_rev, arch, pkg_hash, install_ts, size_bytes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO packages (name, version, build_rev, arch, pkg_hash, install_ts, size_bytes, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 pkg.name,
                 pkg.version,
@@ -275,6 +304,7 @@ impl Database {
                 pkg.pkg_hash,
                 pkg.install_ts,
                 pkg.size_bytes,
+                pkg.reason,
             ],
         )
         .map_err(DbError::Sqlite)?;
@@ -372,6 +402,24 @@ impl Database {
                     req: row.get(2)?,
                 })
             })
+            .map_err(DbError::Sqlite)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(DbError::Sqlite)?);
+        }
+        Ok(out)
+    }
+
+    // ━━━━━━━━━━━━━━━ DAO: rdeps ━━━━━━━━━━━━━━━
+
+    /// Имена установленных пакетов, которые объявляют зависимость от `name`.
+    pub fn reverse_deps(&self, name: &str) -> DbResult<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT pkg FROM deps WHERE dep_name = ?1 ORDER BY pkg")
+            .map_err(DbError::Sqlite)?;
+        let rows = stmt
+            .query_map(params![name], |row| row.get::<_, String>(0))
             .map_err(DbError::Sqlite)?;
         let mut out = Vec::new();
         for row in rows {
@@ -504,6 +552,7 @@ mod tests {
             pkg_hash: "abcd".into(),
             install_ts: now_ts(),
             size_bytes: 12345,
+            reason: "explicit".into(),
         };
         db.insert_package(&pkg).unwrap();
 
@@ -531,6 +580,7 @@ mod tests {
             pkg_hash: "a".into(),
             install_ts: now_ts(),
             size_bytes: 1,
+            reason: "dependency".into(),
         })
         .unwrap();
         db.insert_package(&Package {
@@ -541,6 +591,7 @@ mod tests {
             pkg_hash: "b".into(),
             install_ts: now_ts(),
             size_bytes: 2,
+            reason: "explicit".into(),
         })
         .unwrap();
 
@@ -565,6 +616,7 @@ mod tests {
             pkg_hash: "h".into(),
             install_ts: now_ts(),
             size_bytes: 10,
+            reason: "explicit".into(),
         })
         .unwrap();
 
@@ -624,6 +676,7 @@ mod tests {
             pkg_hash: "h".into(),
             install_ts: now_ts(),
             size_bytes: 10,
+            reason: "explicit".into(),
         })
         .unwrap();
 

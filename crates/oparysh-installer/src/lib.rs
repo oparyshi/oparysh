@@ -15,6 +15,13 @@
 //!       (`build/`, `tmp/`), пропускаемый при `--keep-build`
 //!       (см. [`cache_recipe`], [`cleanup`]).
 
+pub mod remove;
+pub use remove::{
+    REMOVE_BLOCKED_EXIT_CODE, REMOVE_DB_EXIT_CODE, REMOVE_NOT_FOUND_EXIT_CODE, RemoveError,
+    RemoveOutcome, REASON_DEPENDENCY, REASON_EXPLICIT, autoremove, autoremove_candidates,
+    remove_package,
+};
+
 use oparysh_core::recipe::Recipe;
 use oparysh_core::version::DepReq;
 use oparysh_db::{BuildInfo, Database, Dep, FileEntry, Package};
@@ -332,6 +339,7 @@ pub fn commit_package(
     deps: &DepSnapshot,
     build: &BuildRecord,
     pkg_hash: &str,
+    reason: &str,
 ) -> Result<CommitOutcome, InstallError> {
     let name = recipe.pkg.name.clone();
 
@@ -365,6 +373,7 @@ pub fn commit_package(
         pkg_hash: pkg_hash.to_string(),
         install_ts: now_ts(),
         size_bytes: manifest.size_bytes(),
+        reason: reason.to_string(),
     };
     db.commit_package(&pkg, &files, &dep_rows, Some(&info))?;
 
