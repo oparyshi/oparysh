@@ -228,3 +228,180 @@ fn cache_recipe_and_cleanup() {
 
     cleanup_dirs(&[&db]);
 }
+
+// ━━━━━━━━━━━━━━━━━━ 9.5: тесты удаления ━━━━━━━━━━━━━━━━━━
+
+fn install_pkg(
+    database: &mut Database,
+    db_dir: &Path,
+    destroot: &Path,
+    name: &str,
+    version: &str,
+    deps_run: &[&str],
+    reason: &str,
+) {
+    let rel = format!("usr/local/bin/{name}");
+    let dest = destroot.join(&rel);
+    fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    fs::write(&dest, format!("binary {name}").as_bytes()).unwrap();
+
+    let manifest = Manifest {
+        files: vec![ManifestEntry {
+            rel: rel.clone(),
+            src: dest.clone(),
+            dest: dest.clone(),
+            sha256: hex_sha(format!("binary {name}").as_bytes()),
+            size: format!("binary {name}").len() as u64,
+        }],
+        unknown: Vec::new(),
+        is_empty: false,
+    };
+    let recipe_toml = format!(
+        r#"
+[pkg]
+name = "{name}"
+version = "{version}"
+build = 1
+arch = ["x86_64"]
+desc = "test pkg"
+license = "MIT"
+homepage = "https://example.org"
+
+[source]
+url = "https://example.org/{name}-{version}.tar.gz"
+sha256 = "deadbeef"
+
+[deps]
+run = [{deps}]
+
+[build]
+system = "make-only"
+"#,
+        deps = deps_run.iter().map(|d| format!("\"{d}\"")).collect::<Vec<_>>().join(", ")
+    );
+    let recipe = Recipe::parse(&recipe_toml).unwrap();
+    let deps = DepSnapshot { run: recipe.deps.run.clone(), build: recipe.deps.build.clone() };
+    let build = BuildRecord::default();
+    commit_package(database, &recipe, &manifest, &deps, &build, "hash", reason).unwrap();
+    // Имитируем кэш рецепта, который пишет установка.
+    cache_recipe(db_dir, name, version, &recipe_toml).unwrap();
+}
+
+#[test]
+fn remove_free_package() {
+    let db = temp_dir("rm_free_db");
+    let destroot = temp_dir("rm_free_root");
+    let mut database = Database::open(&db).unwrap();
+    install_pkg(&mut database, &db, &destroot, "hello", "1.0", &[], REASON_EXPLICIT);
+    let bin = destroot.join("usr/local/bin/hello");
+    assert!(bin.is_file());
+    assert!(db.join("recipes/hello/1.0/pkg.toml").is_file());
+
+    let out = remove_package(&mut database, &db, &destroot, "hello", false).unwrap();
+    assert_eq!(out.files_removed, 1);
+    assert!(out.missing.is_empty());
+    assert!(out.forced_rdeps.is_empty());
+    assert!(out.recipe_cache_removed);
+    assert!(!bin.exists());
+    assert!(database.get_package("hello").unwrap().is_none());
+    assert!(database.get_files("hello").unwrap().is_empty());
+    assert!(!db.join("recipes/hello").exists());
+    drop(database);
+
+    // Повторное удаление → NotInstalled, код 3.
+    let mut database = Database::open(&db).unwrap();
+    let err = remove_package(&mut database, &db, &destroot, "hello", false).unwrap_err();
+    assert!(matches!(err, RemoveError::NotInstalled { .. }));
+    assert_eq!(err.exit_code(), REMOVE_NOT_FOUND_EXIT_CODE);
+    drop(database);
+    cleanup_dirs(&[&db, &destroot]);
+}
+
+#[test]
+fn remove_blocked_by_rdeps() {
+    let db = temp_dir("rm_block_db");
+    let destroot = temp_dir("rm_block_root");
+    let mut database = Database::open(&db).unwrap();
+    install_pkg(&mut database, &db, &destroot, "libgreet", "1.0", &[], REASON_EXPLICIT);
+    install_pkg(&mut database, &db, &destroot, "hello", "1.0", &["libgreet"], REASON_EXPLICIT);
+
+    let err = remove_package(&mut database, &db, &destroot, "libgreet", false).unwrap_err();
+    match err {
+        RemoveError::Blocked { ref name, ref rdeps } => {
+            assert_eq!(name, "libgreet");
+            assert_eq!(rdeps.as_slice(), ["hello".to_string()]);
+        }
+        other => panic!("ожидали Blocked, получили {other}"),
+    }
+    assert_eq!(err.exit_code(), REMOVE_BLOCKED_EXIT_CODE);
+    // Ничего не удалено.
+    assert!(destroot.join("usr/local/bin/libgreet").is_file());
+    assert!(database.get_package("libgreet").unwrap().is_some());
+    drop(database);
+    cleanup_dirs(&[&db, &destroot]);
+}
+
+#[test]
+fn remove_force_ignores_rdeps() {
+    let db = temp_dir("rm_force_db");
+    let destroot = temp_dir("rm_force_root");
+    let mut database = Database::open(&db).unwrap();
+    install_pkg(&mut database, &db, &destroot, "libgreet", "1.0", &[], REASON_EXPLICIT);
+    install_pkg(&mut database, &db, &destroot, "hello", "1.0", &["libgreet"], REASON_EXPLICIT);
+
+    let out = remove_package(&mut database, &db, &destroot, "libgreet", true).unwrap();
+    assert_eq!(out.forced_rdeps, vec!["hello".to_string()]);
+    assert!(!destroot.join("usr/local/bin/libgreet").exists());
+    assert!(database.get_package("libgreet").unwrap().is_none());
+    // Зависимый пакет остаётся установленным.
+    assert!(database.get_package("hello").unwrap().is_some());
+    drop(database);
+    cleanup_dirs(&[&db, &destroot]);
+}
+
+#[test]
+fn autoremove_removes_orphans_to_fixpoint() {
+    let db = temp_dir("rm_auto_db");
+    let destroot = temp_dir("rm_auto_root");
+    let mut database = Database::open(&db).unwrap();
+    // Цепочка app(explicit) → mid(dep) → leaf(dep).
+    install_pkg(&mut database, &db, &destroot, "leaf", "1.0", &[], REASON_DEPENDENCY);
+    install_pkg(&mut database, &db, &destroot, "mid", "1.0", &["leaf"], REASON_DEPENDENCY);
+    install_pkg(&mut database, &db, &destroot, "app", "1.0", &["mid"], REASON_EXPLICIT);
+
+    // Пока app установлен — сирот нет.
+    assert!(autoremove_candidates(&database).unwrap().is_empty());
+
+    // Удаляем app — mid становится сиротой, затем leaf.
+    remove_package(&mut database, &db, &destroot, "app", false).unwrap();
+    let candidates = autoremove_candidates(&database).unwrap();
+    assert_eq!(candidates, vec!["mid".to_string()]);
+
+    let removed = autoremove(&mut database, &db, &destroot).unwrap();
+    let names: Vec<&str> = removed.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, vec!["mid", "leaf"]);
+    assert!(database.list_packages().unwrap().is_empty());
+    assert!(!destroot.join("usr/local/bin/mid").exists());
+    assert!(!destroot.join("usr/local/bin/leaf").exists());
+    drop(database);
+    cleanup_dirs(&[&db, &destroot]);
+}
+
+#[test]
+fn autoremove_keeps_explicit_and_needed() {
+    let db = temp_dir("rm_keep_db");
+    let destroot = temp_dir("rm_keep_root");
+    let mut database = Database::open(&db).unwrap();
+    // libdep нужен app; explicitlib — явно установленный, никем не нужен,
+    // но explicit → autoremove не трогает.
+    install_pkg(&mut database, &db, &destroot, "libdep", "1.0", &[], REASON_DEPENDENCY);
+    install_pkg(&mut database, &db, &destroot, "explicitlib", "1.0", &[], REASON_EXPLICIT);
+    install_pkg(&mut database, &db, &destroot, "app", "1.0", &["libdep"], REASON_EXPLICIT);
+
+    let removed = autoremove(&mut database, &db, &destroot).unwrap();
+    assert!(removed.is_empty());
+    assert!(database.get_package("libdep").unwrap().is_some());
+    assert!(database.get_package("explicitlib").unwrap().is_some());
+    drop(database);
+    cleanup_dirs(&[&db, &destroot]);
+}
