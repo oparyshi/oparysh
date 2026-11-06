@@ -99,7 +99,7 @@
 - [x] 7.8. Команда `oparysh build <pkg|recipe-dir>` — собрать, **не устанавливая**
 - [x] 7.9. Интеграционный тест: сборка фиктивного `hello` из fixtures end-to-end в tmp-каталоге (`crates/oparysh-builder/tests/fixture_hello_e2e.rs`)
 
-## Этап 8. Installer (установка) ☐ (8.1–8.7 ☑)
+## Этап 8. Installer (установка) ☑
 **нужно:** этап 3, 7
 
 - [x] 8.1. Псевдо-`DESTDIR`: сборка в `<db_dir>/tmp/<pkg>-<ver>-destdir/` (`oparysh_installer::destdir`, `oparysh build`)
@@ -109,7 +109,7 @@
 - [x] 8.5. Команда `install --file <pkg.toml>` — установка из локального рецепта минуя репо
 - [x] 8.6. Оркестрация `oparysh install`: resolver → подтверждение → fetch/build/install по топологическому порядку
 - [x] 8.7. Учёт `deps.build` vs `deps.run`: build-зависимости не тянутся в рантайм-граф
-- [ ] 8.8. Интеграционный тест: `install` цепочки из 2–3 фикстурных пакетов в изолированном корне
+- [x] 8.8. Интеграционный тест: `install` цепочки из 2–3 фикстурных пакетов в изолированном корне
 
 ## Этап 9. Remover (удаление) ☐
 **нужно:** этап 3, 8
