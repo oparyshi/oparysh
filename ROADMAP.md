@@ -86,7 +86,7 @@
 - [x] 6.6. Команда `oparysh clean [--src|--build|--logs|--all]`
 - [x] 6.7. Тесты: кэш-хит, кэш-мисс, битый хэш
 
-## Этап 7. Builder (сборка) ◐
+## Этап 7. Builder (сборка) ☑
 **нужно:** этап 1, 6
 
 - [x] 7.1. Вычисление финальных флагов (раздел 6): `CFLAGS = profile + build.extra + recipe.build.cflags`, `MAKEOPTS = -j{jobs} + …`, приоритет `cc`: config → recipe
@@ -97,7 +97,7 @@
 - [x] 7.6. Логи сборки в `logs/<pkg>-<ver>-<date>.log`; шаг упал → сборка прервана, `build/` сохранён, код **7**
 - [x] 7.7. Перекрытия (`--set cflags=… --set cc=…`, `--jobs N`) только на одну сборку
 - [x] 7.8. Команда `oparysh build <pkg|recipe-dir>` — собрать, **не устанавливая**
-- [ ] 7.9. Интеграционный тест: сборка фиктивного `hello` из fixtures end-to-end в tmp-каталоге
+- [x] 7.9. Интеграционный тест: сборка фиктивного `hello` из fixtures end-to-end в tmp-каталоге (`crates/oparysh-builder/tests/fixture_hello_e2e.rs`)
 
 ## Этап 8. Installer (установка) ☐
 **нужно:** этап 3, 7
