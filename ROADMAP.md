@@ -127,7 +127,7 @@
 - [x] 10.2. `oparysh downgrade <pkg> <ver>` из репо/кэша
 - [x] 10.3. `oparysh history [pkg]` — журнал установок/обновлений/удалений (таблица events в БД или журнал-файлы)
 - [x] 10.4. Проверка `--outdated`, `--orphaned` для `list`
-- [ ] 10.5. Сценарий-тест: install → upgrade → autoremove (как в приложении A)
+- [x] 10.5. Сценарий-тест: install → upgrade → autoremove (как в приложении A) (`crates/oparysh-cli/tests/scenario_install_upgrade_autoremove.rs`)
 
 ## Этап 11. Диагностика и целостность установленного ☐
 **нужно:** этап 3, 8
