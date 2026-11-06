@@ -9,9 +9,11 @@
 //! разбирается **до** записи в кэш ([`NetworkRepo::fetch_index`]): битый
 //! index.toml не перекроет прошлый корректный.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use oparysh_core::config::RepoEntry;
+use oparysh_core::index::RepoIndex;
 
 use crate::error::{RepoError, RepoResult};
 use crate::net::{CachedRepo, NetworkRepo};
@@ -87,7 +89,28 @@ pub fn sync_repos(
             }
             RepoSource::Network(url) => {
                 let repo = NetworkRepo::new(url.clone());
-                let (index_path, index) = repo.fetch_index(cache_dir)?;
+                let key_path = r.key.as_deref().map(Path::new);
+                // 13.1: если указан snapshot, скачиваем и распаковываем
+                // database.tar.zst вместо отдельного index.toml.
+                if let Some(snapshot_url) = &r.snapshot {
+                    let index_path = repo.fetch_database_snapshot(cache_dir, &r.name, snapshot_url)?;
+                    let index = RepoIndex::parse(
+                        &fs::read_to_string(&index_path)
+                            .map_err(|source| RepoError::Io(source))?,
+                    )
+                    .map_err(|source| RepoError::IndexParse {
+                        path: index_path.display().to_string(),
+                        source,
+                    })?;
+                    outcomes.push(SyncOutcome {
+                        name: r.name.clone(),
+                        kind: SyncKind::Network,
+                        packages: index.pkg.len(),
+                        index_path,
+                    });
+                    continue;
+                }
+                let (index_path, index) = repo.fetch_index(cache_dir, key_path)?;
                 outcomes.push(SyncOutcome {
                     name: r.name.clone(),
                     kind: SyncKind::Network,
@@ -118,6 +141,7 @@ mod tests {
             path,
             url,
             key: None,
+        snapshot: None,
         }
     }
 

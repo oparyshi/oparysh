@@ -30,6 +30,10 @@ pub use net::{
     cached_index_path, repo_cache_dir, CachedRepo, NetworkRepo, REPO_CACHE_DIR,
 };
 
+mod signature;
+
+pub use signature::{signature_path, verify_detached_signature, SignatureError, SignaturePolicy};
+
 mod priority;
 
 pub use priority::{RepoRef, RepoSet, RepoSource};

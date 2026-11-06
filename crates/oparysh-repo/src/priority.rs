@@ -47,6 +47,10 @@ pub struct RepoRef {
     pub name: String,
     /// Определённый источник записи (правило `local > network` применено).
     pub source: RepoSource,
+    /// Путь к открытому ключу GPG для проверки подписи index.toml (опционально).
+    pub key: Option<String>,
+    /// URL или путь к `database.tar.zst` — оффлайн-снапшоту (этап 13.1).
+    pub snapshot: Option<String>,
 }
 
 impl RepoRef {
@@ -87,6 +91,8 @@ impl RepoSet {
             refs.push(RepoRef {
                 name: entry.name.clone(),
                 source,
+                key: entry.key.clone(),
+                snapshot: entry.snapshot.clone(),
             });
         }
         Ok(RepoSet { refs })
@@ -200,6 +206,7 @@ mod tests {
             path: path.map(str::to_string),
             url: url.map(str::to_string),
             key: None,
+        snapshot: None,
         }
     }
 

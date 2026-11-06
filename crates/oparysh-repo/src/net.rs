@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use oparysh_core::index::RepoIndex;
 
 use crate::error::{RepoError, RepoResult};
+use crate::signature::verify_detached_signature;
 use crate::{INDEX_FILE, RECIPES_DIR, RECIPE_FILE};
 
 /// Имя подкаталога кэша с индексами сетевых репозиториев.
@@ -69,7 +70,11 @@ impl NetworkRepo {
     /// Возвращает путь к файлу кэша (уже на диске) и разобранный индекс.
     /// Разбор выполняется **до** записи в кэш: битый index.toml не попадает
     /// в кэш и не перекрывает предыдущий корректный.
-    pub fn fetch_index(&self, cache_dir: &Path) -> RepoResult<(PathBuf, RepoIndex)> {
+    pub fn fetch_index(
+        &self,
+        cache_dir: &Path,
+        key: Option<&Path>,
+    ) -> RepoResult<(PathBuf, RepoIndex)> {
         let url = self.index_url();
         let raw = self.download(&url)?;
 
@@ -80,6 +85,44 @@ impl NetworkRepo {
             path: url.clone(),
             source,
         })?;
+
+        // 13.2: если у репозитория указан открытый ключ, проверяем подпись.
+        if let Some(key_path) = key {
+            let sig_url = format!("{}/{}", self.url, crate::signature::SIGNATURE_FILE);
+            let sig_result = self.download(&sig_url);
+            let sig_raw = match sig_result {
+                Ok(data) => data,
+                Err(RepoError::Network { source, .. }) => {
+                    return Err(RepoError::SignatureMissing {
+                        url: sig_url.clone(),
+                        source,
+                    });
+                }
+                Err(other) => return Err(other),
+            };
+            let sig_tmp = cache_dir.join(format!(
+                "index.toml.sig.part-{}",
+                std::process::id()
+            ));
+            fs::write(&sig_tmp, &sig_raw)
+                .map_err(|source| RepoError::Io(source))?;
+            let index_tmp = cache_dir.join(format!(
+                "index.toml.part-{}",
+                std::process::id()
+            ));
+            fs::write(&index_tmp, raw.as_bytes())
+                .map_err(|source| RepoError::Io(source))?;
+            verify_detached_signature(&index_tmp, &sig_tmp, key_path).map_err(|source| {
+                let _ = fs::remove_file(&index_tmp);
+                let _ = fs::remove_file(&sig_tmp);
+                RepoError::SignatureInvalid {
+                    path: index_tmp.display().to_string(),
+                    source,
+                }
+            })?;
+            let _ = fs::remove_file(&index_tmp);
+            let _ = fs::remove_file(&sig_tmp);
+        }
 
         let dest_dir = repo_cache_dir(cache_dir).join(&index.repo.name);
         if !RepoName::validate(&index.repo.name) {
@@ -181,9 +224,41 @@ impl NetworkRepo {
                 source,
             })
     }
+
+    /// Скачивает `database.tar.zst` снапшот репозитория и распаковывает его в
+    /// кэш `<cache_dir>/repo/<repo_name>/` (этап 13.1 ROADMAP, DOCS §4).
+    ///
+    /// Снапшот содержит полный репозиторий: `index.toml`, `recipes/`, `dist/`.
+    /// После распаковки возвращается путь к `index.toml` в кэше.
+    pub fn fetch_database_snapshot(
+        &self,
+        cache_dir: &Path,
+        repo_name: &str,
+        snapshot_url: &str,
+    ) -> RepoResult<PathBuf> {
+        let raw = self.download(snapshot_url)?;
+        let dest_dir = repo_cache_dir(cache_dir).join(repo_name);
+        fs::create_dir_all(&dest_dir)?;
+
+        let decoder = zstd::stream::read::Decoder::new(&raw[..])
+            .map_err(|source| RepoError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("zstd decoder init: {source}"))))?;
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .unpack(&dest_dir)
+            .map_err(|source| RepoError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("tar unpack: {source}"))))?;
+
+        let index_path = dest_dir.join(INDEX_FILE);
+        if !index_path.is_file() {
+            return Err(RepoError::NotARepo {
+                path: snapshot_url.to_string(),
+                message: "database.tar.zst не содержит index.toml".to_string(),
+            });
+        }
+
+        Ok(index_path)
+    }
 }
 
-/// Репозиторий в кэше (`<cache_dir>/repo/<name>/`): только разобрать index.toml.
 ///
 /// В отличие от [`LocalRepo`] не требует `recipes/` и `dist/` — кэш индексов
 /// в момент `sync` их ещё не содержит.
@@ -291,7 +366,7 @@ mod tests {
         let (addr, server) = spawn_server(http_response("200 OK", INDEX_BODY));
 
         let repo = NetworkRepo::new(format!("http://{addr}"));
-        let (path, index) = repo.fetch_index(&cache).unwrap();
+        let (path, index) = repo.fetch_index(&cache, None).unwrap();
 
         // index.toml лежит в <cache>/repo/stable/
         let expected = cache.join("repo").join("stable").join(INDEX_FILE);
@@ -315,7 +390,7 @@ mod tests {
 
         let repo = NetworkRepo::new(format!("http://{addr}"));
         // Сетевой сбой, кэш не записан.
-        let err = repo.fetch_index(&cache).unwrap_err();
+        let err = repo.fetch_index(&cache, None).unwrap_err();
         let msg = err.to_string();
         assert!(matches!(err, RepoError::Network { .. }), "{msg}");
         assert!(!repo_cache_dir(&cache)
@@ -333,7 +408,7 @@ mod tests {
         let (addr, server) = spawn_server(http_response("200 OK", body));
 
         let repo = NetworkRepo::new(format!("http://{addr}"));
-        let err = repo.fetch_index(&cache).unwrap_err();
+        let err = repo.fetch_index(&cache, None).unwrap_err();
         assert!(matches!(err, RepoError::IndexParse { .. }), "{err}");
         // Битый индекс не попал в кэш (fail fast до записи).
         assert!(!repo_cache_dir(&cache).exists());
@@ -346,7 +421,7 @@ mod tests {
         let cache = cache_dir().join("cache");
         let (addr, server) = spawn_server(http_response("200 OK", INDEX_BODY));
         let repo = NetworkRepo::new(format!("http://{addr}"));
-        let (path, _old) = repo.fetch_index(&cache).unwrap();
+        let (path, _old) = repo.fetch_index(&cache, None).unwrap();
         server.join().unwrap();
 
         // Вторая синхронизация с другим содержимым — кэш обновлён.
@@ -355,7 +430,7 @@ mod tests {
             b"[repo]\nname = \"stable\"\nupdated = 42\n\n[[pkg]]\nname = \"hello\"\nversion = \"2.0\"\nrecipe_sha = \"aa\"\nsrc_sha256 = \"bb\"\n",
         ));
         let repo2 = NetworkRepo::new(format!("http://{addr2}"));
-        let (path2, index2) = repo2.fetch_index(&cache).unwrap();
+        let (path2, index2) = repo2.fetch_index(&cache, None).unwrap();
         assert_eq!(path2, path);
         assert_eq!(index2.repo.updated, 42);
         server2.join().unwrap();

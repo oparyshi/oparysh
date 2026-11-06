@@ -69,6 +69,14 @@ pub enum RepoError {
     #[error("не удалось скачать {url}: {source}")]
     Network { url: String, source: ureq::Error },
 
+    /// Не удалось скачать файл подписи `index.toml.sig` — код **5**.
+    #[error("не удалось скачать подпись {url}: {source}")]
+    SignatureMissing { url: String, source: ureq::Error },
+
+    /// Подпись `index.toml` неверна или ключ не подошёл — код **6**.
+    #[error("подпись index.toml неверна ({path}): {source}")]
+    SignatureInvalid { path: String, source: crate::signature::SignatureError },
+
     /// Имя репозитория, полученное из index.toml, нельзя использовать
     /// как имя каталога кэша.
     #[error("некорректное имя репозитория: {name}")]
