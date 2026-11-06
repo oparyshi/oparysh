@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output};
+use std::process::{Command, ExitStatus};
 
 /// Копия фикстуры `tests/fixtures/hello-1.0` с настоящим тарболом и sha256.
 fn recipe_dir(tmp: &Path) -> PathBuf {
@@ -115,7 +115,7 @@ fn build_recipe_dir_without_install_applies_overrides() {
     assert!(stdout.contains("jobs = 2"), "{stdout}");
     // Установка не выполнялась: файлы только в tmp-DESTDIR.
     assert!(stdout.contains("установка не выполнялась"), "{stdout}");
-    let built = tmp.join("db/tmp/hello-1.0-build/usr/local/bin/hello");
+    let built = tmp.join("db/tmp/hello-1.0-destdir/usr/local/bin/hello");
     assert!(built.is_file(), "DESTDIR-артефакт на месте: {stdout}");
     let running = Command::new(&built).output().unwrap();
     assert!(running.status.success());
@@ -146,6 +146,55 @@ fn build_recipe_dir_without_install_applies_overrides() {
         mentions, 1,
         "перекрытие не должно переживать вторую сборку: {log}"
     );
+}
+
+#[test]
+fn build_install_installs_to_destroot_and_records_db() {
+    let tmp = tmp_dir("install");
+    let dir = recipe_dir(&tmp);
+    let _ = config_file(&tmp);
+    // destroot изолируем в tmp (никогда не пишите в реальный /).
+    let root = tmp.join("root");
+    fs::write(
+        tmp.join("oparysh.conf"),
+        format!(
+            "[general]\njobs = 4\ndb_dir = {:?}\ncache_dir = {:?}\ndestroot = {:?}\n\n\
+             [build.active]\nprofile = \"release\"\n\n\
+             [profile.release]\ncflags = \"-O2\"\n",
+            tmp.join("db").to_string_lossy(),
+            tmp.join("cache").to_string_lossy(),
+            root.to_string_lossy(),
+        ),
+    )
+    .unwrap();
+
+    let (status, stdout, stderr) = run(
+        &tmp,
+        &["build", dir.to_str().unwrap(), "--install"],
+    );
+    assert!(status.success(), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("Установлено: hello 1.0"), "{stdout}");
+    // Файл в destroot.
+    assert!(root.join("usr/local/bin/hello").is_file(), "{stdout}");
+    // DESTDIR и build-каталог очищены (8.4).
+    assert!(!tmp.join("db/tmp/hello-1.0-destdir").exists(), "{stdout}");
+    assert!(!tmp.join("db/build/hello-1.0").exists(), "{stdout}");
+    // Кэш рецепта записан.
+    assert!(tmp.join("db/recipes/hello/1.0/pkg.toml").is_file());
+    // БД: packages/files/deps/build_info заполнены (8.3).
+    let db = oparysh_db::Database::open(&tmp.join("db")).unwrap();
+    let pkg = db.get_package("hello").unwrap().unwrap();
+    assert_eq!(pkg.name, "hello");
+    assert_eq!(pkg.version, "1.0");
+    assert!(pkg.size_bytes > 0);
+    let files = db.get_files("hello").unwrap();
+    assert_eq!(files.len(), 1);
+    assert!(files[0].path.ends_with("usr/local/bin/hello"));
+    assert!({
+        let expected = oparysh_verifier::sha256_file(&root.join("usr/local/bin/hello")).unwrap();
+        files[0].sha256 == expected
+    });
+    assert!(db.get_build_info("hello").unwrap().is_some());
 }
 
 #[test]

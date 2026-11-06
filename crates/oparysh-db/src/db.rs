@@ -9,6 +9,7 @@ use crate::error::{DbError, DbResult};
 use crate::lock::AdvisoryLock;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +20,7 @@ const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_LOCK_NAME: &str = "lock";
 
 /// Счётчик для уникальных имён тестовых директорий (чтобы тесты не конфликтовали на advisory-lock).
+#[cfg(test)]
 static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Текущая схема БД (одна миграция — создание всех таблиц).
@@ -248,6 +250,60 @@ impl Database {
         Ok(changed > 0)
     }
 
+    /// Записать установленный пакет целиком ОДНОЙ транзакцией (этап 8.3):
+    /// `packages` + `files` + `deps` + `build_info`. Если пакет с тем же
+    /// именем уже был установлен, его строки удаляются в той же транзакции
+    /// (reinstall через каскад ON DELETE).
+    pub fn commit_package(
+        &mut self,
+        pkg: &Package,
+        files: &[FileEntry],
+        deps: &[Dep],
+        info: Option<&BuildInfo>,
+    ) -> DbResult<()> {
+        let tx = self.conn.transaction().map_err(DbError::Sqlite)?;
+        tx.execute("DELETE FROM packages WHERE name = ?1", params![pkg.name])
+            .map_err(DbError::Sqlite)?;
+        tx.execute(
+            "INSERT INTO packages (name, version, build_rev, arch, pkg_hash, install_ts, size_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                pkg.name,
+                pkg.version,
+                pkg.build_rev as i64,
+                pkg.arch,
+                pkg.pkg_hash,
+                pkg.install_ts,
+                pkg.size_bytes,
+            ],
+        )
+        .map_err(DbError::Sqlite)?;
+        for f in files {
+            tx.execute(
+                "INSERT INTO files (pkg, path, sha256) VALUES (?1, ?2, ?3)",
+                params![f.pkg, f.path, f.sha256],
+            )
+            .map_err(DbError::Sqlite)?;
+        }
+        for d in deps {
+            tx.execute(
+                "INSERT INTO deps (pkg, dep_name, req) VALUES (?1, ?2, ?3)",
+                params![d.pkg, d.dep_name, d.req],
+            )
+            .map_err(DbError::Sqlite)?;
+        }
+        if let Some(info) = info {
+            tx.execute(
+                "INSERT INTO build_info (pkg, cc, cflags, makeopts, profile, cmd)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![info.pkg, info.cc, info.cflags, info.makeopts, info.profile, info.cmd],
+            )
+            .map_err(DbError::Sqlite)?;
+        }
+        tx.commit().map_err(DbError::Sqlite)?;
+        Ok(())
+    }
+
     // ━━━━━━━━━━━━━━━ DAO: files ━━━━━━━━━━━━━━━
 
     /// Вставить список файлов пакета одним批量.
@@ -368,7 +424,7 @@ pub fn backup_db(db_dir: &Path) -> DbResult<PathBuf> {
     let src_conn = Connection::open(&src).map_err(DbError::Sqlite)?;
     let mut dst_conn = Connection::open(&dst).map_err(DbError::Sqlite)?;
     {
-        let mut backup = rusqlite::backup::Backup::new(&src_conn, &mut dst_conn)
+        let backup = rusqlite::backup::Backup::new(&src_conn, &mut dst_conn)
             .map_err(|e| DbError::Backup(format!("backup init: {e}")))?;
         loop {
             let result = backup

@@ -99,13 +99,13 @@
 - [x] 7.8. Команда `oparysh build <pkg|recipe-dir>` — собрать, **не устанавливая**
 - [x] 7.9. Интеграционный тест: сборка фиктивного `hello` из fixtures end-to-end в tmp-каталоге (`crates/oparysh-builder/tests/fixture_hello_e2e.rs`)
 
-## Этап 8. Installer (установка) ☐
+## Этап 8. Installer (установка) ☐ (8.1–8.4 ☑)
 **нужно:** этап 3, 7
 
-- [ ] 8.1. Псевдо-`DESTDIR`: сборка в `/var/lib/oparysh/tmp/<pkg>-<ver>-destdir/`
-- [ ] 8.2. Manifest scan: обход DESTDIR, список файлов + sha256 каждого; незаявленное — предупреждение, с `--strict` — ошибка (учёт `[files].unknown_warn`)
-- [ ] 8.3. Commit: перенос файлов в `destroot`, запись `packages` + `files` + `deps` + `build_info` в БД единой транзакцией
-- [ ] 8.4. Кэш рецепта в `recipes/<name>/<ver>/pkg.toml` и cleanup (`build/`, `tmp/`), если не `--keep-build`
+- [x] 8.1. Псевдо-`DESTDIR`: сборка в `<db_dir>/tmp/<pkg>-<ver>-destdir/` (`oparysh_installer::destdir`, `oparysh build`)
+- [x] 8.2. Manifest scan: обход DESTDIR, список файлов + sha256 каждого; незаявленное (вне `install.prefix`) — предупреждение, с `--strict` — ошибка (учёт `[files].unknown_warn`) (`oparysh_installer::scan_manifest`, `ScanPolicy`)
+- [x] 8.3. Commit: перенос файлов в `destroot`, запись `packages` + `files` + `deps` + `build_info` в БД единой транзакцией (`Database::commit_package`, `oparysh_installer::commit_package` / `move_to_destroot`)
+- [x] 8.4. Кэш рецепта в `recipes/<name>/<ver>/pkg.toml` и cleanup (`build/`, `tmp/<pkg>-<ver>-destdir/`), если не `--keep-build` (`oparysh_installer::cache_recipe`, `oparysh_installer::cleanup`)
 - [ ] 8.5. Команда `install --file <pkg.toml>` — установка из локального рецепта минуя репо
 - [ ] 8.6. Оркестрация `oparysh install`: resolver → подтверждение → fetch/build/install по топологическому порядку
 - [ ] 8.7. Учёт `deps.build` vs `deps.run`: build-зависимости не тянутся в рантайм-граф

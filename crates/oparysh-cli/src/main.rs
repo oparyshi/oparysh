@@ -834,6 +834,16 @@ enum Command {
         /// Перекрыть число заданий сборки (stage 7.7)
         #[arg(long = "jobs", value_name = "N")]
         jobs: Option<u32>,
+        /// Установить пакет после успешной сборки (stage 8.1–8.4):
+        /// manifest scan → перенос в destroot → запись в БД
+        #[arg(long)]
+        install: bool,
+        /// Незаявленные файлы (вне install.prefix) = ошибка (stage 8.2)
+        #[arg(long)]
+        strict: bool,
+        /// Не удалять каталог сборки <db_dir>/build/ после установки
+        #[arg(long)]
+        keep_build: bool,
     },
     /// Управление репозиториями в конфиге (stage 4.5)
     Repo {
@@ -945,6 +955,8 @@ struct BuildTarget {
     /// Тарбол из `dist/` репозитория, когда источник — `[source].file`:
     /// (репозиторий, относительный путь, `src_sha256`).
     repo_dist: Option<(oparysh_repo::RepoSource, String, String)>,
+    /// Исходный текст рецепта (для pkg_hash и кэша `recipes/`).
+    raw_toml: String,
 }
 
 /// Разобрать цель `oparysh build <pkg|recipe-dir>` (7.8).
@@ -973,6 +985,7 @@ fn build_target(target: &str, config: &OparyshConfig, _assume_yes: bool) -> Resu
             recipe,
             recipe_dir: Some(path.to_path_buf()),
             repo_dist: None,
+            raw_toml: raw.clone(),
         });
     }
 
@@ -1018,20 +1031,32 @@ fn build_target(target: &str, config: &OparyshConfig, _assume_yes: bool) -> Resu
         .file
         .as_ref()
         .and_then(|file| source.dist_file(&candidate, file));
+    let raw_toml = toml::to_string(&recipe).unwrap_or_default();
     Ok(BuildTarget {
         name: candidate.name.clone(),
         version: candidate.version_str.clone(),
         recipe,
         recipe_dir: None,
         repo_dist,
+        raw_toml,
     })
 }
 
 /// `oparysh build <pkg|recipe-dir> [--set k=v]… [--jobs N]` — 7.7 + 7.8:
 /// просто собрать (fetch → extract → patches → план сборки), НЕ устанавливая.
-/// Файлы `make install` кладутся в `<db_dir>/tmp/<pkg>-<ver>-build/` (DESTDIR),
-/// в систему ничего не попадает и БД не меняется.
-fn run_build(target: &str, sets: &[String], jobs: Option<u32>, assume_yes: bool) {
+/// Файлы `make install` кладутся в pseudo-DESTDIR `<db_dir>/tmp/<pkg>-<ver>-destdir/`
+/// (DOCS §8.4). С `--install` после успешной сборки выполняется этап 8:
+/// manifest scan → перенос в destroot → запись в БД единой транзакцией →
+/// кэш рецепта и cleanup (если не `--keep-build`).
+fn run_build(
+    target: &str,
+    sets: &[String],
+    jobs: Option<u32>,
+    install: bool,
+    strict: bool,
+    keep_build: bool,
+    assume_yes: bool,
+) {
     let mut overrides = match oparysh_builder::FlagOverrides::parse(sets) {
         Ok(overrides) => overrides,
         Err(e) => {
@@ -1113,11 +1138,9 @@ fn run_build(target: &str, sets: &[String], jobs: Option<u32>, assume_yes: bool)
     }
 
     // Псевдо-DESTDIR: результат install-шагов остаётся в tmp/, не устанавливается.
-    let destdir = db
-        .join("tmp")
-        .join(format!("{}-{}-build", target.name, target.version));
-    if let Err(e) = std::fs::create_dir_all(&destdir) {
-        eprintln!("ERROR: не удалось создать {}: {e}", destdir.display());
+    let destdir = oparysh_installer::destdir(&db, &target.name, &target.version);
+    if let Err(e) = oparysh_installer::prepare_destdir(&destdir) {
+        eprintln!("ERROR: не удалось подготовить {}: {e}", destdir.display());
         std::process::exit(1);
     }
 
@@ -1175,16 +1198,143 @@ fn run_build(target: &str, sets: &[String], jobs: Option<u32>, assume_yes: bool)
     let work_dir = extracted.source_root.clone();
     match oparysh_builder::run_build_plan(&plan, &work_dir, &mut log) {
         Ok(()) => {
-            println!(
-                "Готово: {} {} собран, установка не выполнялась (DESTDIR {})",
-                target.name,
-                target.version,
-                destdir.display()
-            );
+            if install {
+                install_built(
+                    &config,
+                    &db,
+                    &target,
+                    &plan,
+                    &oparysh_installer::destdir(&db, &target.name, &target.version),
+                    strict,
+                    keep_build,
+                );
+            } else {
+                println!(
+                    "Готово: {} {} собран, установка не выполнялась (DESTDIR {})",
+                    target.name,
+                    target.version,
+                    oparysh_installer::destdir(&db, &target.name, &target.version).display()
+                );
+            }
         }
         Err(e) => {
             eprintln!("ERROR: {e}");
             std::process::exit(oparysh_builder::BUILD_FAILED_EXIT_CODE);
+        }
+    }
+}
+
+/// `oparysh build --install`: этап 8 (8.1–8.4) после успешной сборки.
+/// manifest scan → перенос в destroot → запись в БД единой транзакцией →
+/// кэш рецепта (`recipes/<n>/<v>/pkg.toml`) и cleanup (если не keep-build).
+fn install_built(
+    config: &OparyshConfig,
+    db: &Path,
+    target: &BuildTarget,
+    plan: &oparysh_builder::BuildPlan,
+    destdir: &Path,
+    strict: bool,
+    keep_build: bool,
+) {
+    let destroot = PathBuf::from(&config.general.destroot);
+    let prefix = target.recipe.build.install.prefix.clone();
+    let policy = oparysh_installer::ScanPolicy {
+        unknown_warn: target.recipe.files.unknown_warn,
+        strict,
+    };
+    let manifest = match oparysh_installer::scan_manifest(destdir, &destroot, &prefix, policy) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
+        }
+    };
+    if manifest.is_empty {
+        eprintln!("ERROR: DESTDIR {} пуст — нечего устанавливать", destdir.display());
+        std::process::exit(1);
+    }
+    if let Err(e) = oparysh_installer::move_to_destroot(&manifest) {
+        eprintln!("ERROR: {e}");
+        std::process::exit(e.exit_code());
+    }
+
+    // pkg_hash — sha256 кэшированной копии рецепта (recipes/<n>/<v>/pkg.toml).
+    let cached = match oparysh_installer::cache_recipe(
+        db,
+        &target.name,
+        &target.version,
+        &target.raw_toml,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
+        }
+    };
+    let pkg_hash = oparysh_verifier::sha256_file(&cached).unwrap_or_default();
+
+    let cmd = plan
+        .steps
+        .iter()
+        .map(|s| s.argv.join(" "))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let build_record = oparysh_installer::BuildRecord {
+        cc: plan.environment.get("CC").cloned().unwrap_or_default(),
+        cflags: plan.environment.get("CFLAGS").cloned().unwrap_or_default(),
+        makeopts: plan.environment.get("MAKEOPTS").cloned().unwrap_or_default(),
+        profile: config.active_profile().to_string(),
+        cmd,
+    };
+    let deps = oparysh_installer::DepSnapshot {
+        run: target.recipe.deps.run.clone(),
+        build: target.recipe.deps.build.clone(),
+    };
+
+    let mut database = open_db(config);
+    let outcome = match oparysh_installer::commit_package(
+        &mut database,
+        &target.recipe,
+        &manifest,
+        &deps,
+        &build_record,
+        &pkg_hash,
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
+        }
+    };
+    println!(
+        "Установлено: {} {} — файлов {}, {} байт (destroot {})",
+        outcome.name,
+        outcome.version,
+        outcome.files,
+        outcome.size_bytes,
+        destroot.display()
+    );
+
+    let keep = keep_build || config.general.keep_build;
+    match oparysh_installer::cleanup(db, &outcome.name, &outcome.version, keep) {
+        Ok(report) => {
+            if report.build_removed {
+                println!(
+                    "cleanup: <db_dir>/build/{}-{} удалён",
+                    outcome.name, outcome.version
+                );
+            }
+            if report.destdir_removed {
+                println!("cleanup: {} удалён", destdir.display());
+            }
+            if keep {
+                println!("cleanup: build/ сохранён (keep_build)");
+            }
+            println!("Рецепт: {}", cached.display());
+        }
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
         }
     }
 }
@@ -1298,9 +1448,14 @@ fn main() {
         Some(Command::Deps { tree, pkg }) => run_deps(&pkg, tree),
         Some(Command::Rdeps { pkg }) => run_rdeps(&pkg),
         Some(Command::Why { pkg }) => run_why(&pkg),
-        Some(Command::Build { target, sets, jobs }) => {
-            run_build(&target, &sets, jobs, assume_yes);
-        }
+        Some(Command::Build {
+            target,
+            sets,
+            jobs,
+            install,
+            strict,
+            keep_build,
+        }) => run_build(&target, &sets, jobs, install, strict, keep_build, assume_yes),
         Some(Command::Repo { action }) => match action {
             RepoCommand::Add { name, target } => match run_repo_add(&name, &target) {
                 Ok(msg) => println!("{msg}"),

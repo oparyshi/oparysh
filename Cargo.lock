@@ -471,9 +471,11 @@ dependencies = [
  "oparysh-core",
  "oparysh-db",
  "oparysh-fetcher",
+ "oparysh-installer",
  "oparysh-repo",
  "oparysh-resolver",
  "oparysh-verifier",
+ "toml",
 ]
 
 [[package]]
@@ -514,8 +516,10 @@ dependencies = [
 name = "oparysh-installer"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "rusqlite",
+ "oparysh-core",
+ "oparysh-db",
+ "oparysh-verifier",
+ "sha2",
 ]
 
 [[package]]

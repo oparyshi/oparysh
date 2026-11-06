@@ -5,5 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-rusqlite = { workspace = true }
-anyhow = { workspace = true }
+sha2 = { workspace = true }
+oparysh-core = { workspace = true }
+oparysh-db = { workspace = true }
+oparysh-verifier = { workspace = true }
