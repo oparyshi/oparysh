@@ -1,0 +1,186 @@
+.OPARYSH 1 "4 ноября 2026" "oparysh 0.1.0" "oparysh User Manual"
+.SH НАЗВАНИЕ
+oparysh \- source-based пакетный менеджер на Rust
+.SH СИНТАКСИС
+\fBoparysh\fP [\fIглобальные опции\fP] \fIкоманда\fP [\fIаргументы\fP]
+.SH ОПИСАНИЕ
+\fBoparysh\fP \u2014 source-based пакетный менеджер. Пакеты собираются локально из исходного кода: зависимости разрешаются автоматически, флаги компиляции (\fBCFLAGS\fP, \fBMAKEOPTS\fP) и компилятор настраиваются, целостность каждого артефакта проверяется по SHA-256.
+.SH ГЛОБАЛЬНЫЕ ОПЦИИ
+.TP
+\fB--config\fP \fIPATH\fP
+Путь к конфигу (по умолчанию /etc/oparysh/oparysh.conf или $OPARYSH_CONFIG)
+.TP
+\fB--db-dir\fP \fIPATH\fP
+Перекрыть \fBdb_dir\fP (как OPARYSH_DB_DIR)
+.TP
+\fB--cache-dir\fP \fIPATH\fP
+Перекрыть \fBcache_dir\fP (как OPARYSH_CACHE_DIR)
+.TP
+\fB--root\fP \fIPATH\fP
+Установить в другой корень — chroot-установка (как OPARYSH_ROOT)
+.TP
+\fB--jobs\fP \fIN\fP
+Перекрыть число заданий сборки (как OPARYSH_JOBS)
+.TP
+\fB--verbose\fP, \fB-v\fP
+Подробная диагностика в stderr
+.TP
+\fB--yes\fP
+Не спрашивать подтверждение у команд, которые его поддерживают
+.SH КОМАНДЫ
+.TP
+\fBcheck\fP [\fIPKG\fP\u2026]
+Сверить установленные файлы с БД (sha256): removed | modified | new. Пусто — все установленные (полный аудит).
+.TP
+\fBverify\fP \fITARBALL\fP [\fB--expected\fP \fISHA\fP]
+Проверить SHA-256 тарбола. С \fB--expected\fP — сверка с ожидаемым хэшем (код 6 при несовпадении).
+.TP
+\fBrebuild-db\fP [\fB--db-dir\fP \fIPATH\fP]
+Восстановить базу данных из резервной копии db.sqlite.bak.
+.TP
+\fBsync\fP [\fIREPO\fP\u2026]
+Скачать/обновить index.toml всех (или указанных) репозиториев.
+.TP
+\fBsearch\fP \fIPATTERN\fP
+Поиск по имени/описанию/тегам (glob или /regex/).
+.TP
+\fBinfo\fP \fIPKG\fP
+Показать метаданные пакета: зависимости, provides, версию, репозиторий.
+.TP
+\fBlist\fP [\fB--installed\fP|\fB--available\fP|\fB--outdated\fP|\fB--orphaned\fP]
+Список пакетов.
+.TP
+\fBplan\fP \fIPKG\fP\u2026
+Показать план разрешения зависимостей и запросить подтверждение.
+.TP
+\fBdeps\fP [\fB--tree\fP] \fIPKG\fP
+Дерево или список зависимостей пакета.
+.TP
+\fBrdeps\fP \fIPKG\fP
+Обратные зависимости среди установленных пакетов.
+.TP
+\fBwhy\fP \fIPKG\fP
+Объяснить, зачем установлен пакет.
+.TP
+\fBbuild\fP \fIPKG|\fIDIR\fP [\fB--set\fP \fIK=V\fP\u2026] [\fB--jobs\fP \fIN\fP]
+Собрать пакет или рецепт из каталога, без установки.
+.TP
+\fBinstall\fP \fIPKG\fP\u2026 [\fB--set\fP \fIK=V\fP\u2026] [\fB--jobs\fP \fIN\fP]
+Разрешить зависимости, собрать и установить цели + build-зависимости.
+.TP
+\fBremove\fP \fIPKG\fP\u2026 [\fB--force\fP]
+Удалить установленные пакеты по манифесту файлов.
+.TP
+\fBautoremove\fP
+Удалить пакеты-«сироты»: стояли как зависимости, никому не нужны.
+.TP
+\fBupgrade\fP [\fIPKG\fP\u2026] [\fB--set\fP \fIK=V\fP\u2026] [\fB--jobs\fP \fIN\fP]
+Обновить все или указанные установленные пакеты.
+.TP
+\fBdowngrade\fP \fIPKG\fP \fIVER\fP
+Откат пакета на конкретную версию из репо или кэша рецептов.
+.TP
+\fBhistory\fP [\fIPKG\fP]
+Журнал установок/обновлений/понижений/удалений.
+.TP
+\fBrepo\fP \fIadd|list|del\fP
+Управление репозиториями в конфиге.
+.TP
+\fBclean\fP [\fB--src\fP|\fB--build\fP|\fB--logs\fP|\fB--all\fP]
+Очистить кэши исходников/сборки/логов.
+.TP
+\fBcompletions\fP \fIshell\fP [\fB--output\fP \fIPATH\fP]
+Генерировать скрипты автодополнения для оболочки (bash, zsh, fish, powershell).
+.TP
+\fBhelp\fP
+Вывести справку.
+.SH КОДЫ ВОЗВРАТА
+.TP
+0
+Успех
+.TP
+1
+Общая ошибка
+.TP
+2
+Неверные аргументы CLI
+.TP
+3
+Пакет не найден ни в одном репозитории
+.TP
+4
+Не удаётся удовлетворить зависимости (конфликт/версии)
+.TP
+5
+Ошибка загрузки (сеть/репо недоступен)
+.TP
+6
+SHA-256 mismatch / артефакт не прошёл проверку целостности
+.TP
+7
+Ошибка сборки (шаг вернул != 0)
+.TP
+8
+Ошибка базы данных (блокировка, повреждение)
+.TP
+9
+Запрещено: удаление пакета, от которого зависят другие (без \fB--force\fP)
+.SH ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+.TP
+\fBOPARYSH_DB_DIR\fP
+Перекрывает \fBdb_dir\fP в конфиге
+.TP
+\fBOPARYSH_CACHE_DIR\fP
+Перекрывает \fBcache_dir\fP в конфиге
+.TP
+\fBOPARYSH_ROOT\fP
+Эквивалент \fB--root\fP
+.TP
+\fBOPARYSH_JOBS\fP
+Эквивалент \fB--jobs\fP
+.TP
+\fBOPARYSH_CC\fP / \fBOPARYSH_CXX\fP
+Перекрывают компилятор
+.TP
+\fBOPARYSH_CFLAGS\fP / \fBOPARYSH_CXXFLAGS\fP
+Доп. флаги поверх профиля (как \fBbuild.extra\fP)
+.TP
+\fBOPARYSH_MAKEOPTS\fP
+Доп. makeopts
+.TP
+\fBOPARYSH_PROFILE\fP
+Перекрыть активный профиль сборки
+.TP
+\fBOPARYSH_NO_COLORS\fP / \fBNO_COLOR\fP
+Отключить цветной вывод
+.TP
+\fBOPARYSH_CONFIG\fP
+Путь к конфигу (вместо /etc/oparysh/oparysh.conf)
+.SH ФАЙЛЫ
+.TP
+/etc/oparysh/oparysh.conf
+Системный конфиг: профили, тулчейн, репозитории
+.TP
+/var/lib/oparysh/db.sqlite
+Локальная база установленных пакетов (SQLite)
+.TP
+/var/lib/oparysh/src/
+Кэш исходников (тарболы)
+.TP
+/var/lib/oparysh/build/
+Рабочие каталоги сборки
+.TP
+/var/lib/oparysh/logs/
+Логи сборок
+.TP
+/var/lib/oparysh/lock
+Advisory-lock БД (flock)
+.TP
+/usr/local/oparysh/cache/repo/
+Кэш индексов сетевых репозиториев
+.SH СМ. ТАКЖЕ
+\fBoparysh.conf\fP(5), \fBpkg.toml\fP(5)
+.SH АВТОРЫ
+oparysh contributors <https://github.com/oparysh/oparysh>
+.SH ЛИЦЕНЗИЯ
+MIT
