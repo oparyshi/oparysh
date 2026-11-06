@@ -1,6 +1,6 @@
 # AGENTS.md — oparysh
 
-Source-based пакетный менеджер на Rust (workspace). Спецификация проекта — `DOCS.md`, план работ — `ROADMAP.md` (этапы 0–3 ☑ выполнены, этап 4 repo — следующий). README и ROADMAP периодически расходятся с кодом: DOCS.md — первичный источник по формату рецептов, конфига, индексов, кодов возврата и переменных окружения.
+Source-based пакетный менеджер на Rust (workspace). Спецификация проекта — `DOCS.md`, план работ — `ROADMAP.md` (статус этапов см. в ROADMAP, он периодически меняется). README и ROADMAP периодически расходятся с кодом: DOCS.md — первичный источник по формату рецептов, конфига, индексов, кодов возврата и переменных окружения.
 
 ## Команды
 
@@ -10,11 +10,15 @@ cargo test --workspace          # то же, что гоняет CI (.github/wor
 cargo test -p oparysh-core      # тесты одного crate
 ```
 
-Отдельного `lint`/`fmt` в CI нет. `tests/integration/` пока пуст; юнит-тесты лежат внутри crate'­ов, фикстуры — `tests/fixtures/hello-1.0` (фальшивый make-пакет: `pkg.toml`, `hello.c`, `Makefile`, и его же `src_sha256`/`recipe_sha` нужны для тестов verifier/db) и `tests/fixtures/mini-repo` (локальный репозиторий из 3 пакетов с реальными `index.toml`, `recipes/`, `dist/`; интеграционные тесты — `crates/oparysh-repo/tests/mini_repo.rs`).
+Отдельного `lint`/`fmt` в CI нет. `tests/integration/` пока пуст; интеграционные тесты лежат в `crates/*/tests/`, юнит-тесты внутри `src/`. Фикстуры:
+- `tests/fixtures/hello-1.0` — фальшивый make-пакет (`pkg.toml`, `hello.c`, `Makefile`), используется тестами core/builder/fetcher;
+- `tests/fixtures/mini-repo` — локальный репозиторий из 3 пакетов с цепочкой зависимостей (`libgreet` → `hello` → `hello-tools`) и **настоящими** хэшами в `index.toml`. После изменения рецептов/тарболов фикстуры пересобрать индекс:
+  `cargo run -p oparysh-repo-index-gen -- tests/fixtures/mini-repo --name mini --origin https://example.org/mini --updated 1704067200`
+  (иначе `crates/oparysh-repo/tests/mini_repo.rs` упадёт на проверке `recipe_sha`/`src_sha256`).
 
 ## Структура
 
-9 crate'ов в `crates/`, соответствуют подсистемам из DOCS.md §1: `cli` (только clap + точка входа оркестрации), `core` (типы рецепта `pkg.toml`, `index.toml`, `oparysh.conf`, версии, валидация — по DOCS §4–6), `resolver`, `fetcher` (ureq), `verifier` (SHA-256), `builder`, `installer`, `db` (rusqlite bundled + flock), `repo`. `contrib/` (комплшены, генератор index.toml) — заглушки, не реализовано.
+9 crate'ов в `crates/`, соответствуют подсистемам из DOCS.md §1: `cli` (только clap + точка входа оркестрации), `core` (типы рецепта `pkg.toml`, `index.toml`, `oparysh.conf`, версии, валидация — по DOCS §4–6), `resolver`, `fetcher` (ureq), `verifier` (SHA-256), `builder`, `installer`, `db` (rusqlite bundled + flock), `repo`. Плюс `contrib/repo-index-gen` — реализованный CLI-генератор `index.toml` (генератор пересборки индекса фикстур); `contrib/shell` (комплшены) — пусто.
 
 Версии общих зависимостей и пути внутренних crate'ов — через `[workspace.dependencies]` в корневом `Cargo.toml` (наследуются `workspace = true`). Синхронный HTTP (ureq 3), не tokio/reqwest.
 
