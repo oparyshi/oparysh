@@ -189,13 +189,20 @@ pub fn compute_flags_with(
         rb.cc.clone()
     };
 
+    let mut ldflags = join_flags(&[&profile.ldflags, &extra.ldflags, &rb.ldflags]);
+    // linker из toolchain ("mold", "ld.lld", …): включаем через -fuse-ld=
+    let linker = config.toolchain.linker.trim();
+    if !linker.is_empty() {
+        ldflags = join_flags(&[&ldflags, &format!("-fuse-ld={linker}")]);
+    }
+
     let flags = BuildFlags {
         cc,
         cxx: config.toolchain.cxx.clone(),
         cpp: config.toolchain.cpp.clone(),
         cflags: join_flags(&[&profile.cflags, &extra.cflags, &rb.cflags]),
         cxxflags: join_flags(&[&profile.cxxflags, &extra.cxxflags]),
-        ldflags: join_flags(&[&profile.ldflags, &extra.ldflags, &rb.ldflags]),
+        ldflags,
         makeopts: join_flags(&[&format!("-j{jobs}"), &extra.makeopts, &rb.makeopts]),
         jobs,
         prefix: recipe.build.install.prefix.clone(),

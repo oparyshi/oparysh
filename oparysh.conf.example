@@ -1,0 +1,59 @@
+# Пример конфигурации oparysh (oparysh.conf).
+# Положите как /etc/oparysh/oparysh.conf (или путь через --config / OPARYSH_CONFIG).
+#везде в путях работает развёртка `~` (DOCS §6).
+
+[general]
+db_dir        = "/var/lib/oparysh"
+cache_dir     = "/usr/local/oparysh/cache"
+destroot      = "/"               # корень, куда реально устанавливаются файлы
+jobs          = 8                 # -j для make; перекрывает параллель из рецепта
+keep_build    = false             # не удалять build/-каталог после успешной сборки
+assume_yes    = false             # не задавать вопросы при подтверждении плана
+
+# Компиляторы. cc/cxx/cpp — точные команды или абсолютные пути.
+[toolchain]
+cc  = "gcc"                       # напр.: "clang", "/opt/gcc-15/bin/gcc"
+cxx = "g++"
+cpp = "cpp"
+linker = ""                       # "", использ. по умолчанию; иначе: "mold", "ld.lld"
+
+# Профили CFLAGS. Выбирается один активный: profile = "release" ([build.active])
+[build.active]
+profile = "release"
+
+[profile.release]
+cflags   = "-O2 -pipe -fstack-protector-strong"
+cxxflags = "-O2 -pipe -fstack-protector-strong"
+ldflags  = "-Wl,-O1"
+
+[profile.debug]
+cflags   = "-O0 -g3"
+cxxflags = "-O0 -g3"
+
+[profile.size]
+cflags   = "-Os -s"
+
+# Дополнительные флаги, СКЛЕИВАЮТСЯ с флагами активного профиля.
+# Полезно, чтобы не переписывать профиль целиком:
+[build.extra]
+cflags   = "-march=native"
+cxxflags = "-march=native"
+ldflags  = ""
+makeopts = ""                     # добавляется к make в дополнение к -j{jobs}
+env      = {}
+
+# Приоритет наложения флагов (конкатенация слева направо):
+#   финальные CFLAGS = [profile.cflags] + [build.extra.cflags] + [recipe.build.cflags]
+#   финальные MAKEOPTS = "-j{jobs} " + [config makeopts] + [recipe.build.makeopts]
+#   CC = toolchain.cc, если recipe.build.cc пуст — иначе recipe.build.cc побеждает.
+
+# Приоритет репозиториев: local > network, порядок в конфиге имеет значение.
+[repositories]
+[[repositories.entries]]
+name = "local"                   # локальный каталог-репо
+path = "/srv/oparysh-repo"
+
+[[repositories.entries]]
+name   = "stable"
+url    = "https://repo.example.com/stable"
+key    = "/etc/oparysh/keys/stable.gpg"   # ключ проверки подписанного index.toml (опц.)

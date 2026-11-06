@@ -228,6 +228,18 @@ impl std::fmt::Display for EnvOverrideError {
 
 impl std::error::Error for EnvOverrideError {}
 
+/// Развернуть ведущую `~` в пути: `"~"` → `$HOME`, `"~/..."` → `$HOME/...`.
+/// Остальные значения (включая `~user`) возвращаются без изменений.
+fn expand_tilde(path: &str, home: &str) -> String {
+    if path == "~" {
+        home.to_string()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        format!("{}/{}", home.trim_end_matches('/'), rest)
+    } else {
+        path.to_string()
+    }
+}
+
 /// Склеить фрагмент флагов с существующим значением через один пробел.
 fn append_flag(base: &str, extra: &str) -> String {
     let extra = extra.trim();
@@ -308,6 +320,31 @@ impl OparyshConfig {
             self.build.active.profile = v;
         }
         Ok(())
+    }
+
+    /// Развёртка `~` в путях конфига (DOCS §6: «везде работает развёртка `~`»).
+    ///
+    /// Затрагивает `general.db_dir`, `general.cache_dir`, `general.destroot`,
+    /// а также `path` и `key` каждой записи `[[repositories.entries]]`.
+    pub fn expand_tildes(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        self.expand_tildes_with(&home);
+    }
+
+    /// Вариант [`OparyshConfig::expand_tildes`] с явным домашним каталогом —
+    /// для тестов.
+    pub fn expand_tildes_with(&mut self, home: &str) {
+        self.general.db_dir = expand_tilde(&self.general.db_dir, home);
+        self.general.cache_dir = expand_tilde(&self.general.cache_dir, home);
+        self.general.destroot = expand_tilde(&self.general.destroot, home);
+        for entry in &mut self.repositories.entries {
+            if let Some(p) = &mut entry.path {
+                *p = expand_tilde(p, home);
+            }
+            if let Some(k) = &mut entry.key {
+                *k = expand_tilde(k, home);
+            }
+        }
     }
 
     /// Вернуть имя активного профиля.

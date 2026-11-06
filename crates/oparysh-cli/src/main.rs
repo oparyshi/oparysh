@@ -64,6 +64,8 @@ fn load_config(explicit: Option<&Path>) -> OparyshConfig {
         eprintln!("ERROR: {e}");
         std::process::exit(2);
     }
+    // DOCS §6: «везде работает развёртка ~»
+    cfg.expand_tildes();
     if verbose() {
         eprintln!(
             "verbose: config={} db_dir={} cache_dir={} destroot={} profile={}",
@@ -2355,7 +2357,7 @@ fn main() {
     if cli.verbose {
         std::env::set_var("OPARYSH_VERBOSE", "1");
     }
-    let assume_yes = cli.yes;
+    let assume_yes = cli.yes || load_config(cli.config.as_deref()).general.assume_yes;
     match cli.command {
         Some(Command::Verify { tarball, expected }) => {
             if let Some(expected) = expected {

@@ -139,14 +139,14 @@
 - [x] 11.5. `--root <path>` / `--db-dir` / `--cache-dir` / `--config` глобальные опции (`crates/oparysh-cli/tests/global_opts.rs`)
 - [x] 11.6. `oparysh clean --all`, `check` для всех пакетов (аудит) (`oparysh check` без аргументов = полный аудит; `tests/check_cmd.rs::check_named_package_and_full_audit`)
 
-## Этап 12. Конфиг и профили — полный цикл ☐
+## Этап 12. Конфиг и профили — полный цикл ☑
 **нужно:** этап 7
 
-- [ ] 12.1. Развёртка `~` в путях, `oparysh.conf.example` в корне
-- [ ] 12.2. Активный профиль (`[build.active]`) + `OPARYSH_PROFILE` перекрытие
-- [ ] 12.3. `linker` ("mold", "ld.lld") в toolchain
-- [ ] 12.4. `assume_yes`, `keep_build`, `jobs` из `[general]`
-- [ ] 12.5. Тесты приоритетов флагов: profile ⊕ extra ⊕ recipe (конкатенация слева направо)
+- [x] 12.1. Развёртка `~` в путях, `oparysh.conf.example` в корне
+- [x] 12.2. Активный профиль (`[build.active]`) + `OPARYSH_PROFILE` перекрытие
+- [x] 12.3. `linker` ("mold", "ld.lld") в toolchain
+- [x] 12.4. `assume_yes`, `keep_build`, `jobs` из `[general]`
+- [x] 12.5. Тесты приоритетов флагов: profile ⊕ extra ⊕ recipe (конкатенация слева направо)
 
 ## Этап 13. Репозитории сетевые — полный цикл ☐
 **нужно:** этап 4, 6

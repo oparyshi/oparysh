@@ -118,3 +118,76 @@ profile = "release"
 fn config_invalid_toml() {
     assert!(OparyshConfig::parse("not valid toml [[[").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// 12.1 — развёртка `~` в путях конфига
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tilde_expansion_with_explicit_home() {
+    let toml = r#"
+[general]
+db_dir = "~/oparysh/db"
+cache_dir = "~"
+destroot = "~/root"
+
+[toolchain]
+cc = "gcc"
+cxx = "g++"
+cpp = "cpp"
+
+[build.active]
+profile = "release"
+
+[[repositories.entries]]
+name = "local"
+path = "~/repos/local"
+key = "~/keys/local.gpg"
+"#;
+    let mut cfg = OparyshConfig::parse(toml).unwrap();
+    cfg.expand_tildes_with("/home/tester");
+    assert_eq!(cfg.general.db_dir, "/home/tester/oparysh/db");
+    assert_eq!(cfg.general.cache_dir, "/home/tester");
+    assert_eq!(cfg.general.destroot, "/home/tester/root");
+    assert_eq!(cfg.repositories.entries[0].path.as_deref(), Some("/home/tester/repos/local"));
+    assert_eq!(cfg.repositories.entries[0].key.as_deref(), Some("/home/tester/keys/local.gpg"));
+}
+
+#[test]
+fn tilde_expansion_uses_home_env() {
+    std::env::set_var("HOME", "/home/other");
+    let toml = r#"
+[general]
+db_dir = "~/oparysh/db"
+destroot = "/"
+[toolchain]
+cc = "gcc"
+cxx = "g++"
+cpp = "cpp"
+[build.active]
+profile = "release"
+"#;
+    let mut cfg = OparyshConfig::parse(toml).unwrap();
+    cfg.expand_tildes();
+    assert_eq!(cfg.general.db_dir, "/home/other/oparysh/db");
+    std::env::remove_var("HOME");
+}
+
+#[test]
+fn tilde_expansion_leaves_non_tilde_paths_untouched() {
+    let toml = r#"
+[general]
+db_dir = "/var/lib/oparysh"
+destroot = "/"
+[toolchain]
+cc = "gcc"
+cxx = "g++"
+cpp = "cpp"
+[build.active]
+profile = "release"
+"#;
+    let mut cfg = OparyshConfig::parse(toml).unwrap();
+    cfg.expand_tildes_with("/home/x");
+    assert_eq!(cfg.general.db_dir, "/var/lib/oparysh");
+    assert_eq!(cfg.general.destroot, "/");
+}

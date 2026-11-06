@@ -452,3 +452,26 @@ fn unknown_system_is_error() {
     let err = build_plan(&config, &recipe, "/build/x", "/tmp/x").unwrap_err();
     assert_eq!(err, BuildPlanError::UnknownSystem("tup".into()));
 }
+
+// ---------------------------------------------------------------------------
+// 12.3 — `linker` из toolchain ("mold", "ld.lld") добавляется к LDFLAGS
+// ---------------------------------------------------------------------------
+
+#[test]
+fn linker_adds_fuse_ld_to_ldflags() {
+    let config = OparyshConfig::parse(
+        "[general]\njobs = 4\n\n[toolchain]\ncc = \"gcc\"\nlinker = \"mold\"\n\n[profile.release]\ncflags = \"\"\n",
+    )
+    .unwrap();
+    let recipe = make_recipe("");
+    let f = compute_flags(&config, &recipe).unwrap();
+    assert_eq!(f.ldflags, "-fuse-ld=mold");
+}
+
+#[test]
+fn empty_linker_leaves_ldflags_unchanged() {
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe("ldflags = \"-Wl,-s\"\n");
+    let f = compute_flags(&config, &recipe).unwrap();
+    assert_eq!(f.ldflags, "-Wl,-O1 -Wl,--as-needed -Wl,-s");
+}
