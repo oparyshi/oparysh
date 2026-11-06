@@ -298,6 +298,7 @@ fn repo_package_source_reads_local_repo() {
         path: Some(repo_dir.display().to_string()),
         url: None,
         key: None,
+        snapshot: None,
     }];
     let source = RepoPackageSource::new(&entries, &base.join("cache")).unwrap();
     let set = collect_requirements(&[req("app")], &source, &[]).unwrap();
