@@ -42,6 +42,9 @@ zstd = "0.13"
 anyhow = "1"
 thiserror = "2"
 
+# автодополнение оболочки (этап 14.2)
+clap_complete = "4"
+
 # flock для advisory-lock БД (этап 3.4)
 libc = "0.2"
 

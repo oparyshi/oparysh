@@ -20,3 +20,4 @@ oparysh-resolver = { workspace = true }
 oparysh-fetcher = { workspace = true }
 oparysh-builder = { workspace = true }
 oparysh-installer = { workspace = true }
+clap_complete = { workspace = true }

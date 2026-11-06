@@ -7,7 +7,10 @@ use oparysh_repo::RepoError;
 use oparysh_resolver::{plan::render_plan, RepoPackageSource, ResolveOptions};
 use oparysh_verifier::verify_tarball;
 use std::collections::HashSet;
+use std::io;
+use std::panic;
 use std::path::{Path, PathBuf};
+use std::process;
 
 /// Код возврата для ошибки oparysh-repo по DOCS §11.
 fn repo_exit_code(e: &RepoError) -> i32 {
@@ -990,6 +993,15 @@ enum Command {
         /// Очистить всё: src + build + logs
         #[arg(long)]
         all: bool,
+    },
+    /// Генерировать скрипты автодополнения для оболочки (bash, zsh, fish, powershell)
+    Completions {
+        /// Shell: bash, zsh, fish, powershell
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+        /// Путь для вывода (по умолчанию stdout)
+        #[arg(long, short = 'o', value_name = "PATH")]
+        output: Option<PathBuf>,
     },
 }
 
@@ -2340,6 +2352,23 @@ fn run_history(pkg: Option<&str>) {
 }
 
 fn main() {
+    // 14.4: паник-хук — любая паника превращается в чистое сообщение об ошибке
+    // вместо стандартного трейсируемого падения Rust.
+    panic::set_hook(Box::new(|info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned());
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
+        eprintln!(
+            "ERROR: внутренняя ошибка oparysh (паника){}\n  подробности: {:?}\n  сообщите об этом в баг-репорт с выводом `oparysh --version` и логом сборки.",
+            location.map(|l| format!(" в {}", l)).unwrap_or_default(),
+            payload.unwrap_or_else(|| "<неизвестная паника>".to_string())
+        );
+        process::exit(1);
+    }));
+
     let cli = Cli::parse();
     // Глобальные опции эквивалентны переменным окружения `OPARYSH_*`
     // (DOCS §10/§12, этап 11.5): применяем до любой работы с конфигом.
@@ -2520,6 +2549,21 @@ fn main() {
         },
         Some(Command::Clean { src, build, logs, all }) => {
             run_clean(&db_dir(&load_config(None)), src || all, build || all, logs || all);
+        }
+        Some(Command::Completions { shell, output }) => {
+            let mut cmd = Cli::command();
+            let bin_name = "oparysh";
+            if let Some(path) = output {
+                let mut buf: Vec<u8> = Vec::new();
+                clap_complete::generate(shell, &mut cmd, bin_name, &mut buf);
+                std::fs::write(&path, &buf).unwrap_or_else(|e| {
+                    eprintln!("ERROR: не удалось записать {}: {e}", path.display());
+                    process::exit(1);
+                });
+                println!("Комплишены записаны в {}", path.display());
+            } else {
+                clap_complete::generate(shell, &mut cmd, bin_name, &mut io::stdout());
+            }
         }
         None => {
             let mut cmd = Cli::command();
