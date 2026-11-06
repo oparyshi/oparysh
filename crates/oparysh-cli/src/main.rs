@@ -824,6 +824,17 @@ enum Command {
         /// Пакет в виде `pkg` или `pkg@ver`
         pkg: String,
     },
+    /// Собрать пакет или рецепт из каталога, БЕЗ установки (stage 7.8)
+    Build {
+        /// Пакет (`pkg`, `pkg@ver`) или каталог с рецептом (`pkg.toml`)
+        target: String,
+        /// Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…` (stage 7.7)
+        #[arg(long = "set", value_name = "K=V")]
+        sets: Vec<String>,
+        /// Перекрыть число заданий сборки (stage 7.7)
+        #[arg(long = "jobs", value_name = "N")]
+        jobs: Option<u32>,
+    },
     /// Управление репозиториями в конфиге (stage 4.5)
     Repo {
         #[command(subcommand)]
@@ -922,6 +933,260 @@ fn dir_size(dir: &Path) -> std::io::Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// Цель `oparysh build`: пакет из репозитория или рецепт из каталога.
+struct BuildTarget {
+    name: String,
+    version: String,
+    recipe: oparysh_core::recipe::Recipe,
+    /// Каталог, содержащий рецепт (для patches и сообщений); `None` — из репо.
+    recipe_dir: Option<PathBuf>,
+    /// Тарбол из `dist/` репозитория, когда источник — `[source].file`:
+    /// (репозиторий, относительный путь, `src_sha256`).
+    repo_dist: Option<(oparysh_repo::RepoSource, String, String)>,
+}
+
+/// Разобрать цель `oparysh build <pkg|recipe-dir>` (7.8).
+fn build_target(target: &str, config: &OparyshConfig, _assume_yes: bool) -> Result<BuildTarget, i32> {
+    let path = Path::new(target);
+
+    // Каталог с pkg.toml — локальный рецепт, репозиторий не нужен.
+    if path.is_dir() && path.join("pkg.toml").is_file() {
+        let raw = match std::fs::read_to_string(path.join("pkg.toml")) {
+            Ok(raw) => raw,
+            Err(e) => {
+                eprintln!("ERROR: не удалось прочитать {}/pkg.toml: {e}", path.display());
+                return Err(1);
+            }
+        };
+        let recipe = match oparysh_core::recipe::Recipe::parse(&raw) {
+            Ok(recipe) => recipe,
+            Err(e) => {
+                eprintln!("ERROR: не удалось разобрать {}/pkg.toml: {e}", path.display());
+                return Err(1);
+            }
+        };
+        return Ok(BuildTarget {
+            name: recipe.pkg.name.clone(),
+            version: recipe.pkg.version.clone(),
+            recipe,
+            recipe_dir: Some(path.to_path_buf()),
+            repo_dist: None,
+        });
+    }
+
+    // Пакет из репозитория: выбираем кандидата напрямую (`build` собирает
+    // только запрошенный пакет — зависимости не разрешаются и не собираются;
+    // для этого есть `oparysh install`).
+    let source = match RepoPackageSource::new(&config.repositories.entries, &cache_dir(config)) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            return Err(resolve_exit_code(&e));
+        }
+    };
+    let dep = match dep_req_from_spec(target) {
+        Ok(dep) => dep,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            return Err(2);
+        }
+    };
+    let dep_name = split_pkg_spec(target).0;
+    let candidates = match oparysh_resolver::PackageSource::candidates(&source, &dep_name) {
+        Ok(candidates) => candidates,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            return Err(resolve_exit_code(&e));
+        }
+    };
+    let Some(candidate) = oparysh_resolver::select_latest_satisfying(&candidates, &dep) else {
+        eprintln!("ERROR: пакет `{target}` не найден ни в одном репозитории");
+        return Err(3);
+    };
+    let recipe = match oparysh_resolver::PackageSource::recipe(&source, candidate) {
+        Ok(recipe) => recipe,
+        Err(e) => {
+            eprintln!("ERROR: не удалось получить рецепт `{dep_name}`: {e}");
+            return Err(resolve_exit_code(&e));
+        }
+    };
+    // Источник может лежать в `dist/` репозитория — определяем при наличии.
+    let repo_dist = recipe
+        .source
+        .file
+        .as_ref()
+        .and_then(|file| source.dist_file(&candidate, file));
+    Ok(BuildTarget {
+        name: candidate.name.clone(),
+        version: candidate.version_str.clone(),
+        recipe,
+        recipe_dir: None,
+        repo_dist,
+    })
+}
+
+/// `oparysh build <pkg|recipe-dir> [--set k=v]… [--jobs N]` — 7.7 + 7.8:
+/// просто собрать (fetch → extract → patches → план сборки), НЕ устанавливая.
+/// Файлы `make install` кладутся в `<db_dir>/tmp/<pkg>-<ver>-build/` (DESTDIR),
+/// в систему ничего не попадает и БД не меняется.
+fn run_build(target: &str, sets: &[String], jobs: Option<u32>, assume_yes: bool) {
+    let mut overrides = match oparysh_builder::FlagOverrides::parse(sets) {
+        Ok(overrides) => overrides,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(jobs) = jobs {
+        overrides.jobs = Some(jobs);
+    }
+
+    let config = load_config(None);
+    let target = match build_target(target, &config, assume_yes) {
+        Ok(target) => target,
+        Err(code) => std::process::exit(code),
+    };
+    let db = db_dir(&config);
+
+    // 6.1–6.2: кэш/загрузка тарбола.
+    let dist: Option<(oparysh_fetcher::RepoBase, String, String)> =
+        target.repo_dist.as_ref().map(|(repo, rel_path, sha)| {
+            let base = match repo {
+                oparysh_repo::RepoSource::Local(root) => {
+                    oparysh_fetcher::RepoBase::Local(root.clone())
+                }
+                oparysh_repo::RepoSource::Network(url) => {
+                    oparysh_fetcher::RepoBase::Remote(url.clone())
+                }
+            };
+            (base, rel_path.clone(), sha.clone())
+        });
+    let fetched = match oparysh_fetcher::fetch_source(
+        &db,
+        &oparysh_fetcher::FetchRequest {
+            name: &target.name,
+            version: &target.version,
+            source: &target.recipe.source,
+            repo_dist: dist.as_ref().map(
+                |(base, rel_path, sha)| oparysh_fetcher::RepoDist {
+                    base,
+                    rel_path,
+                    src_sha256: sha,
+                },
+            ),
+        },
+    ) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
+        }
+    };
+
+    // 6.3–6.4: распаковка и патчи.
+    let extracted = match oparysh_fetcher::extract_tarball(
+        &db,
+        &fetched.path,
+        &target.name,
+        &target.version,
+    ) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
+        }
+    };
+    if !target.recipe.patches.is_empty() {
+        let patch_dir = target
+            .recipe_dir
+            .as_ref()
+            .map(|dir| dir.join("patches"))
+            .unwrap_or_else(|| db.join("src"));
+        if let Err(e) =
+            oparysh_fetcher::apply_patches(&extracted.source_root, &target.recipe.patches, &patch_dir)
+        {
+            eprintln!("ERROR: {e}");
+            std::process::exit(e.exit_code());
+        }
+    }
+
+    // Псевдо-DESTDIR: результат install-шагов остаётся в tmp/, не устанавливается.
+    let destdir = db
+        .join("tmp")
+        .join(format!("{}-{}-build", target.name, target.version));
+    if let Err(e) = std::fs::create_dir_all(&destdir) {
+        eprintln!("ERROR: не удалось создать {}: {e}", destdir.display());
+        std::process::exit(1);
+    }
+
+    let plan = match oparysh_builder::build_plan_with(
+        &config,
+        &target.recipe,
+        &extracted.source_root.display().to_string(),
+        &destdir.display().to_string(),
+        &overrides,
+    ) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    if !overrides.sets.is_empty() || overrides.jobs.is_some() {
+        println!("Перекрытия (только на эту сборку):");
+        for (key, value) in &overrides.sets {
+            println!("  {key} = {value}");
+        }
+        if let Some(jobs) = overrides.jobs {
+            println!("  jobs = {jobs}");
+        }
+    }
+    println!(
+        "Сборка {} {} (система {}): {} шагов, лог {}",
+        target.name,
+        target.version,
+        plan.system,
+        plan.steps.len(),
+        oparysh_builder::today_log_path(&db, &target.name, &target.version).display()
+    );
+
+    let log_path = oparysh_builder::today_log_path(&db, &target.name, &target.version);
+    if let Some(parent) = log_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("ERROR: не удалось создать {}: {e}", parent.display());
+            std::process::exit(1);
+        }
+    }
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+    let mut log = match log {
+        Ok(log) => log,
+        Err(e) => {
+            eprintln!("ERROR: не удалось открыть {}: {e}", log_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    let work_dir = extracted.source_root.clone();
+    match oparysh_builder::run_build_plan(&plan, &work_dir, &mut log) {
+        Ok(()) => {
+            println!(
+                "Готово: {} {} собран, установка не выполнялась (DESTDIR {})",
+                target.name,
+                target.version,
+                destdir.display()
+            );
+        }
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(oparysh_builder::BUILD_FAILED_EXIT_CODE);
+        }
+    }
 }
 
 fn main() {
@@ -1033,6 +1298,9 @@ fn main() {
         Some(Command::Deps { tree, pkg }) => run_deps(&pkg, tree),
         Some(Command::Rdeps { pkg }) => run_rdeps(&pkg),
         Some(Command::Why { pkg }) => run_why(&pkg),
+        Some(Command::Build { target, sets, jobs }) => {
+            run_build(&target, &sets, jobs, assume_yes);
+        }
         Some(Command::Repo { action }) => match action {
             RepoCommand::Add { name, target } => match run_repo_add(&name, &target) {
                 Ok(msg) => println!("{msg}"),

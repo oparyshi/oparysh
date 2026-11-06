@@ -341,6 +341,110 @@ fn custom_without_steps_is_error() {
     assert_eq!(err, BuildPlanError::EmptyCustomSteps);
 }
 
+// ---------------------------------------------------------------------------
+// 7.7 — перекрытия --set / --jobs (только на одну сборку)
+// ---------------------------------------------------------------------------
+
+fn override_pairs(pairs: &[&str]) -> oparysh_builder::FlagOverrides {
+    let args: Vec<String> = pairs.iter().map(|s| s.to_string()).collect();
+    oparysh_builder::FlagOverrides::parse(&args).unwrap()
+}
+
+#[test]
+fn overrides_parse_known_keys() {
+    let o = override_pairs(&["cflags=-O3 -flto", "cc=clang", "makeopts=V=2"]);
+    assert_eq!(o.sets["cflags"], "-O3 -flto");
+    assert_eq!(o.sets["cc"], "clang");
+    assert_eq!(o.sets["makeopts"], "V=2");
+    assert_eq!(o.jobs, None);
+}
+
+#[test]
+fn overrides_parse_rejects_unknown_key_and_missing_eq() {
+    let err = oparysh_builder::FlagOverrides::parse(&["tuples=1".to_string()]).unwrap_err();
+    assert!(err.contains("неизвестный флаг"), "{err}");
+    let err = oparysh_builder::FlagOverrides::parse(&["cflags".to_string()]).unwrap_err();
+    assert!(err.contains("k=v"), "{err}");
+}
+
+#[test]
+fn overrides_replace_final_flag_values() {
+    // --set перекрывает финальное значение (профиль + extra + рецепт) целиком.
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe("cflags = \"-DHELLO=1\"\n");
+    let o = override_pairs(&["cflags=-O3 -flto", "cc=clang"]);
+    let f = compute_flags_with(&config, &recipe, &o).unwrap();
+    assert_eq!(f.cflags, "-O3 -flto");
+    assert_eq!(f.cc, "clang");
+    // Остальные флаги не затронуты.
+    assert_eq!(f.cxx, "g++");
+    assert_eq!(f.cxxflags, "-O2 -pipe -march=native");
+    assert_eq!(f.jobs, 8);
+    assert_eq!(f.makeopts, "-j8 V=1");
+}
+
+#[test]
+fn overrides_jobs_replaces_jobs_and_makeopts_lead() {
+    let config = OparyshConfig::parse(CONF).unwrap();
+    // `parallel` в рецепте должен проиграть --jobs.
+    let recipe = make_recipe("parallel = 3\n");
+    let mut o = override_pairs(&[]);
+    o.jobs = Some(16);
+    let f = compute_flags_with(&config, &recipe, &o).unwrap();
+    assert_eq!(f.jobs, 16);
+    assert_eq!(f.makeopts, "-j16 V=1");
+    // Рецепт сам по себе дал бы -j3.
+    let f0 = compute_flags(&config, &recipe).unwrap();
+    assert_eq!(f0.makeopts, "-j3 V=1");
+}
+
+#[test]
+fn overrides_set_makeopts_replaces_entirely() {
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe("");
+    let o = override_pairs(&["makeopts=V=2 VERBOSE=1"]);
+    let f = compute_flags_with(&config, &recipe, &o).unwrap();
+    // --set перекрывает значение целиком; число заданий при этом не трогается
+    // (его меняет --jobs, который пересобирает лидер -j).
+    assert_eq!(f.makeopts, "V=2 VERBOSE=1");
+    assert_eq!(f.jobs, 8);
+}
+
+#[test]
+fn overrides_do_not_mutate_config_or_recipe() {
+    // Перекрытия живут только внутри вычисления: повторный вызов без
+    // перекрытий даёт исходные флаги (конфиг/рецепт не изменены).
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe("");
+    let _ = compute_flags_with(&config, &recipe, &override_pairs(&["cflags=-O0", "cc=tcc"])).unwrap();
+    let f = compute_flags(&config, &recipe).unwrap();
+    assert_eq!(f.cflags, "-O2 -pipe -march=native");
+    assert_eq!(f.cc, "gcc");
+}
+
+#[test]
+fn overrides_flow_into_plan_environment_and_steps() {
+    let config = OparyshConfig::parse(CONF).unwrap();
+    let recipe = make_recipe(r#"system = "autoconf-make""#);
+    let mut o = override_pairs(&["cflags=-O3 -flto", "cc=clang"]);
+    o.jobs = Some(2);
+    let plan = build_plan_with(&config, &recipe, "/b/hello-1.0", "/d/hello", &o).unwrap();
+    let env = &plan.environment;
+    assert_eq!(env.get("CC").unwrap(), "clang");
+    assert_eq!(env.get("CFLAGS").unwrap(), "-O3 -flto");
+    let compile = plan
+        .steps
+        .iter()
+        .find(|s| s.phase == BuildPhase::Compile)
+        .unwrap();
+    assert_eq!(compile.argv, ["make", "-j2", "V=1"]);
+    assert_eq!(compile.env.len(), 0);
+    // Без перекрытий — прежний план.
+    let plain = build_plan(&config, &recipe, "/b/hello-1.0", "/d/hello").unwrap();
+    assert_eq!(plain.environment.get("CC").unwrap(), "gcc");
+    assert_eq!(plain.environment.get("CFLAGS").unwrap(), "-O2 -pipe -march=native");
+}
+
 #[test]
 fn unknown_system_is_error() {
     let config = OparyshConfig::parse(CONF).unwrap();

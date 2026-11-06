@@ -16,3 +16,5 @@ oparysh-db = { workspace = true }
 oparysh-core = { workspace = true }
 oparysh-repo = { workspace = true }
 oparysh-resolver = { workspace = true }
+oparysh-fetcher = { workspace = true }
+oparysh-builder = { workspace = true }

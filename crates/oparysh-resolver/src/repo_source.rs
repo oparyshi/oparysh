@@ -52,6 +52,37 @@ impl RepoPackageSource {
     fn source_of(&self, repo_name: &str) -> Option<&RepoSource> {
         self.set.find(repo_name).map(|r| &r.source)
     }
+
+    /// Расположение тарбола источника в `dist/` репозитория для кандидата
+    /// (если рецепт берёт источник `[source].file = "…"`, DOCS §4).
+    /// Возвращает репозиторий, относительный путь и ожидаемый `src_sha256`.
+    pub fn dist_file(
+        &self,
+        candidate: &Candidate,
+        file: &str,
+    ) -> Option<(RepoSource, String, String)> {
+        let source = self.source_of(&candidate.repo)?.clone();
+        let sha = match &source {
+            RepoSource::Local(root) => LocalRepo::open(root)
+                .ok()?
+                .pkg(&candidate.name, &candidate.version_str)
+                .ok()?
+                .src_sha256
+                .clone(),
+            RepoSource::Network(_) => {
+                let cached = CachedRepo::open(&self.cache_dir, &candidate.repo).ok()?;
+                cached
+                    .index
+                    .pkg
+                    .iter()
+                    .find(|p| p.name == candidate.name && p.version == candidate.version_str)?
+                    .src_sha256
+                    .clone()
+            }
+        };
+        let rel_path = format!("dist/{}/{}/{}", candidate.name, candidate.version_str, file);
+        Some((source, rel_path, sha))
+    }
 }
 
 impl PackageSource for RepoPackageSource {

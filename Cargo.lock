@@ -464,8 +464,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "oparysh-builder",
  "oparysh-core",
  "oparysh-db",
+ "oparysh-fetcher",
  "oparysh-repo",
  "oparysh-resolver",
  "oparysh-verifier",

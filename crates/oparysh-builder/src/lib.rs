@@ -15,6 +15,11 @@
 //!   пишется в лог `logs/<pkg>-<ver>-<date>.log`; первый упавший шаг прерывает
 //!   сборку, каталог `build/` сохраняется, `BuildRunError::Failed` → код
 //!   возврата **7** (DOCS §11).
+//! - **7.7** — перекрытия `--set cflags=… --set cc=…` и `--jobs N`(`FlagOverrides`):
+//!   действуют только на одну сборку (`compute_flags_with`/`build_plan_with`),
+//!   конфиг/рецепт не изменяются.
+//! - **7.8** — команда `oparysh build <pkg|recipe-dir>` (CLI): fetch → extract →
+//!   patches → план сборки, БЕЗ установки; результат остаётся в tmp-DESTDIR.
 
 use oparysh_core::config::OparyshConfig;
 use oparysh_core::recipe::Recipe;
@@ -57,6 +62,82 @@ pub enum FlagError {
     UnknownProfile(String),
 }
 
+/// Перекрытия флагов на одну сборку (7.7).
+///
+/// Задаются пользователем: `--set cflags=… --set cc=…` и `--jobs N`.
+/// Действуют **только на конкретную сборку** — ни рецепт, ни конфиг не меняются.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlagOverrides {
+    /// Значения `k=v` по имени флага; перекрывают финальное значение целиком.
+    pub sets: BTreeMap<String, String>,
+    /// `--jobs N` — перекрывает число заданий (и `-j` в `MAKEOPTS`).
+    pub jobs: Option<u32>,
+}
+
+/// Перекрываемые имена флагов `--set`.
+pub const OVERRIDABLE_FLAGS: &[&str] = &["cc", "cxx", "cpp", "cflags", "cxxflags", "ldflags", "makeopts"];
+
+impl FlagOverrides {
+    /// Разобрать аргументы `k=v`. Неизвестный ключ или отсутствие `=`
+    /// — ошибка (код возврата 2).
+    pub fn parse(args: &[String]) -> Result<Self, String> {
+        let mut sets = BTreeMap::new();
+        for arg in args {
+            let (key, value) = arg
+                .split_once('=')
+                .ok_or_else(|| format!("--set ожидает `k=v`, получено `{arg}`"))?;
+            if !OVERRIDABLE_FLAGS.contains(&key) {
+                return Err(format!(
+                    "--set: неизвестный флаг `{key}` (допустимые: {})",
+                    OVERRIDABLE_FLAGS.join(", ")
+                ));
+            }
+            sets.insert(key.to_string(), value.to_string());
+        }
+        Ok(FlagOverrides { sets, jobs: None })
+    }
+
+    /// Заменить лидер `-j{N}` в строке MAKEOPTS на актуальный `jobs`.
+    fn relead_makeopts(makeopts: &str, jobs: u32) -> String {
+        let head = format!("-j{jobs}");
+        match makeopts.split_once(' ') {
+            Some((first, rest)) if first.starts_with("-j") => format!("{head} {rest}"),
+            Some(_) | None => {
+                if makeopts.starts_with("-j") {
+                    head
+                } else {
+                    join_flags(&[&head, makeopts])
+                }
+            }
+        }
+    }
+}
+
+/// Применить перекрытия к вычисленным флагам (7.7).
+///
+/// `--set k=v` **перекрывает** финальное значение флага целиком (то, что
+/// рассчитано из профиля/конфига/рецепта, отбрасывается). `jobs` также
+/// пересобирает `-j{N}` в начале `MAKEOPTS`.
+fn apply_overrides(mut flags: BuildFlags, overrides: &FlagOverrides) -> BuildFlags {
+    for (key, value) in &overrides.sets {
+        match key.as_str() {
+            "cc" => flags.cc = value.clone(),
+            "cxx" => flags.cxx = value.clone(),
+            "cpp" => flags.cpp = value.clone(),
+            "cflags" => flags.cflags = value.clone(),
+            "cxxflags" => flags.cxxflags = value.clone(),
+            "ldflags" => flags.ldflags = value.clone(),
+            "makeopts" => flags.makeopts = value.clone(),
+            _ => unreachable!("OVERRIDABLE_FLAGS согласован с apply_overrides"),
+        }
+    }
+    if let Some(jobs) = overrides.jobs {
+        flags.jobs = jobs.max(1);
+        flags.makeopts = FlagOverrides::relead_makeopts(&flags.makeopts, flags.jobs);
+    }
+    flags
+}
+
 /// Склеить непустые фрагменты через один пробел.
 fn join_flags(parts: &[&str]) -> String {
     parts
@@ -74,6 +155,20 @@ fn join_flags(parts: &[&str]) -> String {
 /// Для `cc`: непустой `recipe.build.cc` побеждает `toolchain.cc`.
 /// Для `jobs`: `recipe.build.parallel > 0` побеждает `general.jobs`.
 pub fn compute_flags(config: &OparyshConfig, recipe: &Recipe) -> Result<BuildFlags, FlagError> {
+    compute_flags_with(config, recipe, &FlagOverrides::default())
+}
+
+/// Вычислить финальные флаги с перекрытиями `--set`/`--jobs` (7.7).
+///
+/// Перекрытия действуют только на этот вызов (одну сборку): конфиг,
+/// рецепт и профиль не изменяются. `--set k=v` перекрывает финальное
+/// значение флага целиком; `--jobs N` перекрывает число заданий и `-j`
+/// в `MAKEOPTS`.
+pub fn compute_flags_with(
+    config: &OparyshConfig,
+    recipe: &Recipe,
+    overrides: &FlagOverrides,
+) -> Result<BuildFlags, FlagError> {
     let profile_name = config.active_profile().to_string();
     let profile = config
         .find_profile(&profile_name)
@@ -94,7 +189,7 @@ pub fn compute_flags(config: &OparyshConfig, recipe: &Recipe) -> Result<BuildFla
         rb.cc.clone()
     };
 
-    Ok(BuildFlags {
+    let flags = BuildFlags {
         cc,
         cxx: config.toolchain.cxx.clone(),
         cpp: config.toolchain.cpp.clone(),
@@ -104,7 +199,13 @@ pub fn compute_flags(config: &OparyshConfig, recipe: &Recipe) -> Result<BuildFla
         makeopts: join_flags(&[&format!("-j{jobs}"), &extra.makeopts, &rb.makeopts]),
         jobs,
         prefix: recipe.build.install.prefix.clone(),
-    })
+    };
+
+    if overrides.jobs.is_some() || !overrides.sets.is_empty() {
+        Ok(apply_overrides(flags, overrides))
+    } else {
+        Ok(flags)
+    }
 }
 
 /// Канонические переменные окружения сборки (7.5).
@@ -242,7 +343,21 @@ pub fn build_plan(
     src_dir: &str,
     destdir: &str,
 ) -> Result<BuildPlan, BuildPlanError> {
-    let flags = compute_flags(config, recipe)?;
+    build_plan_with(config, recipe, src_dir, destdir, &FlagOverrides::default())
+}
+
+/// Построить план сборки с перекрытиями `--set`/`--jobs` (7.7).
+///
+/// Перекрытия влияют на все фазы плана и на суженное окружение, но не
+/// сохраняются: следующая сборка снова получит флаги из конфига/рецепта.
+pub fn build_plan_with(
+    config: &OparyshConfig,
+    recipe: &Recipe,
+    src_dir: &str,
+    destdir: &str,
+    overrides: &FlagOverrides,
+) -> Result<BuildPlan, BuildPlanError> {
+    let flags = compute_flags_with(config, recipe, overrides)?;
     let subs = Substitutions::new(flags.clone(), src_dir, destdir);
     let bs = &recipe.build.steps;
 
@@ -475,7 +590,7 @@ fn run_step(
     )?;
     log.flush()?;
 
-    let mut child = std::process::Command::new(&executable)
+    let child = std::process::Command::new(&executable)
         .args(&step.argv[1..])
         .current_dir(work_dir)
         .env_clear()
