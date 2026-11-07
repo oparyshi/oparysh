@@ -12,6 +12,32 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process;
 
+
+static LANG_RU: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Русский ли язык интерфейса (LC_ALL / LC_MESSAGES / LANG)?
+fn lang_ru() -> bool {
+    *LANG_RU.get_or_init(|| {
+        for var in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+            if let Ok(l) = std::env::var(var) {
+                let l = l.trim().to_lowercase();
+                if l.is_empty() || l == "c" || l == "posix" {
+                    continue;
+                }
+                if l.starts_with("ru") {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+/// Строка интерфейса: LANG/LC_* `ru*` — русский, иначе английский.
+fn t(ru: impl AsRef<str>, en: impl AsRef<str>) -> String {
+    if lang_ru() { ru.as_ref().to_owned() } else { en.as_ref().to_owned() }
+}
+
 /// Код возврата для ошибки oparysh-repo по DOCS §11.
 fn repo_exit_code(e: &RepoError) -> i32 {
     match e {
@@ -58,7 +84,13 @@ fn load_config(explicit: Option<&Path>) -> OparyshConfig {
     let mut cfg = match OparyshConfig::parse(&text) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("ERROR: не удалось разобрать {}: {e}", path.display());
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: не удалось разобрать {}: {e}", path.display()),
+                    &format!("ERROR: failed to parse {}: {e}", path.display())
+                )
+            );
             std::process::exit(1);
         }
     };
@@ -180,15 +212,39 @@ fn resolve_cli(
             }) => {
                 if assume_yes || !report_errors {
                     if report_errors {
-                        eprintln!("ERROR: неоднозначный поставщик виртуального пакета {virtual_name}: {}; выберите поставщика интерактивно", providers.join(", "));
+                        eprintln!(
+                            "{}",
+                            t(
+                                &format!(
+                                    "ERROR: неоднозначный поставщик виртуального пакета {virtual_name}: {}; выберите поставщика интерактивно",
+                                    providers.join(", ")
+                                ),
+                                &format!(
+                                    "ERROR: ambiguous provider for virtual package {virtual_name}: {}; choose a provider interactively",
+                                    providers.join(", ")
+                                )
+                            )
+                        );
                     }
                     return Err(2);
                 }
-                eprintln!("Выберите поставщика виртуального пакета {virtual_name}:");
+                eprintln!(
+                    "{}",
+                    t(
+                        &format!("Выберите поставщика виртуального пакета {virtual_name}:"),
+                        &format!("Choose a provider for virtual package {virtual_name}:")
+                    )
+                );
                 for (index, provider_name) in providers.iter().enumerate() {
                     eprintln!("  {}) {provider_name}", index + 1);
                 }
-                eprint!("Ваш выбор [1-{}]: ", providers.len());
+                eprint!(
+                    "{}",
+                    t(
+                        &format!("Ваш выбор [1-{}]: ", providers.len()),
+                        &format!("Your choice [1-{}]: ", providers.len())
+                    )
+                );
                 if std::io::Write::flush(&mut std::io::stderr()).is_err() {
                     return Err(1);
                 }
@@ -201,7 +257,7 @@ fn resolve_cli(
                 match selected {
                     Some(selected) => provider = Some(selected),
                     None => {
-                        eprintln!("ERROR: некорректный выбор");
+                        eprintln!("{}", t("ERROR: некорректный выбор", "ERROR: invalid choice"));
                         return Err(2);
                     }
                 }
@@ -266,10 +322,16 @@ fn run_plan(specs: &[String], features: &[String], assume_yes: bool) {
         &source_sizes(&set, &source),
     );
     if !confirm_plan(&plan, assume_yes) {
-        println!("Отменено; изменения не внесены");
+        println!("{}", t("Отменено; изменения не внесены", "Cancelled; no changes made"));
         return;
     }
-    println!("План подтверждён; установку выполняет команда `oparysh install`");
+    println!(
+        "{}",
+        t(
+            "План подтверждён; установку выполняет команда `oparysh install`",
+            "Plan confirmed; run `oparysh install` to perform the installation"
+        )
+    );
 }
 
 /// Рекурсивная печать дочерних узлов с защитой от runtime-циклов.
@@ -367,7 +429,13 @@ fn run_deps(spec: &str, tree: bool) {
                     print_dep_tree(&set, &root);
                 }
             } else {
-                println!("{name:<24} {version:<12} {kind:<10} REQUIRED BY", name="ИМЯ", version="ВЕРСИЯ", kind="ТИП");
+                println!(
+                    "{name:<24} {version:<12} {kind:<10} {req}",
+                    name = t("ИМЯ", "NAME"),
+                    version = t("ВЕРСИЯ", "VERSION"),
+                    kind = t("ТИП", "TYPE"),
+                    req = "REQUIRED BY"
+                );
                 for node in set.nodes.values().filter(|n| !n.is_target) {
                     let kind = match (node.as_build, node.as_run) {
                         (true, true) => "build/run",
@@ -385,10 +453,22 @@ fn run_deps(spec: &str, tree: bool) {
             let db = open_db(&config);
             let installed = db.get_package(&split_pkg_spec(spec).0).ok().flatten();
             let Some(pkg) = installed else {
-                eprintln!("ERROR: пакет `{spec}` не найден ни в репозиториях, ни среди установленных");
+                eprintln!(
+                    "{}",
+                    t(
+                        &format!("ERROR: пакет `{spec}` не найден ни в репозиториях, ни среди установленных"),
+                        &format!("ERROR: package `{spec}` not found in repositories or among installed")
+                    )
+                );
                 std::process::exit(3);
             };
-            println!("{} {} (installed; зависимости из БД)", pkg.name, pkg.version);
+            println!(
+                "{}",
+                t(
+                    &format!("{} {} (installed; зависимости из БД)", pkg.name, pkg.version),
+                    &format!("{} {} (installed; deps from the DB)", pkg.name, pkg.version)
+                )
+            );
             match db.get_deps(&pkg.name) {
                 Ok(deps) => {
                     if tree {
@@ -411,10 +491,21 @@ fn run_rdeps(spec: &str) {
     match reverse_deps_installed(&db, &name) {
         Ok(direct) => {
             if direct.is_empty() {
-                println!("нет установленных пакетов, зависящих от {name}");
+                println!(
+                    "{}",
+                    t(
+                        &format!("нет установленных пакетов, зависящих от {name}"),
+                        &format!("no installed packages depend on {name}")
+                    )
+                );
                 return;
             }
-            println!("{name:<24} {req:<20} ЗАВИСИТ", name="ПАКЕТ", req="ТРЕБОВАНИЕ");
+            println!(
+                "{name:<24} {req:<20} {dep}",
+                name = t("ПАКЕТ", "PACKAGE"),
+                req = t("ТРЕБОВАНИЕ", "REQUIRES"),
+                dep = t("ЗАВИСИТ", "REQUIRED BY")
+            );
             for (pkg, req) in direct {
                 println!("{:<24} {:<20} {}", pkg, req, name);
             }
@@ -431,21 +522,39 @@ fn run_why(spec: &str) {
     let pkg = match db.get_package(&name) {
         Ok(Some(pkg)) => pkg,
         Ok(None) => {
-            eprintln!("ERROR: пакет {name} не установлен");
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: пакет {name} не установлен"),
+                    &format!("ERROR: package {name} is not installed")
+                )
+            );
             std::process::exit(3);
         }
         Err(e) => { eprintln!("ERROR: {e}"); std::process::exit(8); }
     };
-    println!("{} {} установлен", pkg.name, pkg.version);
+    println!(
+        "{}",
+        t(
+            &format!("{} {} установлен", pkg.name, pkg.version),
+            &format!("{} {} is installed", pkg.name, pkg.version)
+        )
+    );
     match reverse_deps_closure(&db, &name) {
         Ok(users) if !users.is_empty() => {
-            println!("Нужен установленным пакетам:");
+            println!("{}", t("Нужен установленным пакетам:", "Required by installed packages:"));
             for user in users {
                 println!("  - {user}");
             }
         }
         Ok(_) => {
-            println!("Ни один установленный пакет от него не зависит; вероятно, он установлен явно.");
+            println!(
+                "{}",
+                t(
+                    "Ни один установленный пакет от него не зависит; вероятно, он установлен явно.",
+                    "No installed package depends on it; it was probably installed explicitly."
+                )
+            );
         }
         Err(e) => { eprintln!("ERROR: {e}"); std::process::exit(8); }
     }
@@ -473,7 +582,13 @@ fn orphaned_packages(db: &Database) -> oparysh_db::DbResult<Vec<Package>> {
 /// Предупреждения о пропущенных репозиториях — в stderr.
 fn print_skipped(skipped: &[(String, String)]) {
     for (name, reason) in skipped {
-        eprintln!("WARN: репозиторий «{name}» пропущен: {reason}");
+        eprintln!(
+            "{}",
+            t(
+                &format!("WARN: репозиторий «{name}» пропущен: {reason}"),
+                &format!("WARN: repository «{name}» skipped: {reason}")
+            )
+        );
     }
 }
 
@@ -530,12 +645,18 @@ fn print_info(info: &oparysh_repo::InfoOutcome) {
             println!("{label:<13} {value}");
         }
     };
-    println!("{:<13} {} {} (build {})", "ПАКЕТ", p.name, p.version, p.build);
-    field("РЕПОЗИТОРИЙ", &info.repo);
-    field("АРХИТЕКТУРА", &p.arch.join(", "));
-    field("ОПИСАНИЕ", &p.desc);
-    field("ТЕГИ", &p.tags.join(", "));
-    field("ЗАВИСИМОСТИ", &p.deps.join(", "));
+    println!(
+        "{:<13} {} {} (build {})",
+        t("ПАКЕТ", "PACKAGE"),
+        p.name,
+        p.version,
+        p.build
+    );
+    field(&t("РЕПОЗИТОРИЙ", "REPOSITORY"), &info.repo);
+    field(&t("АРХИТЕКТУРА", "ARCHITECTURE"), &p.arch.join(", "));
+    field(&t("ОПИСАНИЕ", "DESCRIPTION"), &p.desc);
+    field(&t("ТЕГИ", "TAGS"), &p.tags.join(", "));
+    field(&t("ЗАВИСИМОСТИ", "DEPENDENCIES"), &p.deps.join(", "));
     field("PROVIDES", &p.provides.join(", "));
     field("CONFLICTS", &p.conflicts.join(", "));
     field("RECIPE_SHA", &p.recipe_sha);
@@ -583,13 +704,17 @@ fn list_installed(config: &OparyshConfig) {
         }
     };
     if pkgs.is_empty() {
-        println!("нет установленных пакетов");
+        println!("{}", t("нет установленных пакетов", "no installed packages"));
         return;
     }
     println!(
         "{name:<24} {version:<12} {build:>5} {arch:<10} {size:>12}  {date}",
-        name = "ИМЯ", version = "ВЕРСИЯ", build = "BUILD", arch = "АРХ",
-        size = "РАЗМЕР", date = "УСТАНОВЛЕН"
+        name = t("ИМЯ", "NAME"),
+        version = t("ВЕРСИЯ", "VERSION"),
+        build = "BUILD",
+        arch = t("АРХ", "ARCH"),
+        size = t("РАЗМЕР", "SIZE"),
+        date = t("УСТАНОВЛЕН", "INSTALLED")
     );
     for p in &pkgs {
         print_package_row(p);
@@ -602,12 +727,15 @@ fn list_available(config: &OparyshConfig) {
         Ok(out) => {
             print_skipped(&out.skipped);
             if out.entries.is_empty() {
-                println!("нет доступных пакетов");
+                println!("{}", t("нет доступных пакетов", "no available packages"));
                 return;
             }
             println!(
-                "{name:<24} {version:<12} {repo:<16} ОПИСАНИЕ",
-                name = "ИМЯ", version = "ВЕРСИЯ", repo = "РЕПО"
+                "{name:<24} {version:<12} {repo:<16} {desc}",
+                name = t("ИМЯ", "NAME"),
+                version = t("ВЕРСИЯ", "VERSION"),
+                repo = t("РЕПО", "REPO"),
+                desc = t("ОПИСАНИЕ", "DESCRIPTION")
             );
             for e in &out.entries {
                 println!(
@@ -644,12 +772,15 @@ fn list_outdated(config: &OparyshConfig) {
         Ok(out) => {
             print_skipped(&out.skipped);
             if out.entries.is_empty() {
-                println!("все установленные пакеты актуальны");
+                println!("{}", t("все установленные пакеты актуальны", "all installed packages are up to date"));
                 return;
             }
             println!(
                 "{name:<24} {installed:<12} {available:<12} {repo:<16}",
-                name = "ИМЯ", installed = "УСТАНОВЛЕНА", available = "ДОСТУПНА", repo = "РЕПО"
+                name = t("ИМЯ", "NAME"),
+                installed = t("УСТАНОВЛЕНА", "INSTALLED"),
+                available = t("ДОСТУПНА", "AVAILABLE"),
+                repo = t("РЕПО", "REPO")
             );
             for e in &out.entries {
                 println!(
@@ -676,18 +807,25 @@ fn list_orphaned(config: &OparyshConfig) {
         }
     };
     if pkgs.is_empty() {
-        println!("сирот не найдено");
+        println!("{}", t("сирот не найдено", "no orphans found"));
         return;
     }
     println!(
         "{name:<24} {version:<12}",
-        name = "ИМЯ", version = "ВЕРСИЯ"
+        name = t("ИМЯ", "NAME"),
+        version = t("ВЕРСИЯ", "VERSION")
     );
     for p in &pkgs {
         println!("{:<24} {:<12}", p.name, p.version);
     }
     println!();
-    println!("(ни один установленный пакет от них не зависит)");
+    println!(
+        "{}",
+        t(
+            "(ни один установленный пакет от них не зависит)",
+            "(no installed package depends on them)"
+        )
+    );
 }
 
 /// `oparysh repo add <name> <url|path>`: добавить репозиторий в конфиг.
@@ -711,7 +849,10 @@ fn run_repo_add(name: &str, target: &str) -> Result<String, String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     std::fs::write(&path, &new_text).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(format!("репозиторий «{name}» добавлен в {}", path.display()))
+    Ok(t(
+        &format!("репозиторий «{name}» добавлен в {}", path.display()),
+        &format!("repository «{name}» added to {}", path.display())
+    ))
 }
 
 /// `oparysh repo del <name>`: убрать репозиторий из конфига.
@@ -719,7 +860,10 @@ fn run_repo_del(name: &str) -> Result<String, String> {
     let (path, text) = load_config_text();
     let new_text = config_edit::remove_repository(&text, name).map_err(|e| e.to_string())?;
     std::fs::write(&path, &new_text).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(format!("репозиторий «{name}» убран из {}", path.display()))
+    Ok(t(
+        &format!("репозиторий «{name}» убран из {}", path.display()),
+        &format!("repository «{name}» removed from {}", path.display())
+    ))
 }
 
 /// Сведения об одном репозитории для `repo list`: (источник, пакетов, обновлён).
@@ -734,7 +878,7 @@ fn repo_status(
                 repo.packages().len().to_string(),
                 format_date_utc(repo.index().repo.updated),
             ),
-            Err(_) => (root.display().to_string(), "-".to_string(), "ошибка чтения".to_string()),
+            Err(_) => (root.display().to_string(), "-".to_string(), t("ошибка чтения", "read error")),
         },
         Ok(oparysh_repo::RepoSource::Network(url)) => {
             match oparysh_repo::CachedRepo::open(cache_dir, &entry.name) {
@@ -743,10 +887,17 @@ fn repo_status(
                     cached.packages().len().to_string(),
                     format_date_utc(cached.index.repo.updated),
                 ),
-                Err(_) => (url, "-".to_string(), "не синхронизирован".to_string()),
+                Err(_) => (url, "-".to_string(), t("не синхронизирован", "not synced")),
             }
         }
-        Err(e) => (format!("(невалидная запись: {e})"), "-".to_string(), "-".to_string()),
+        Err(e) => (
+            t(
+                &format!("(невалидная запись: {e})"),
+                &format!("(invalid entry: {e})")
+            ),
+            "-".to_string(),
+            "-".to_string(),
+        ),
     }
 }
 
@@ -756,11 +907,22 @@ fn run_repo_list() {
     let cache = cache_dir(&config);
     let entries = &config.repositories.entries;
     if entries.is_empty() {
-        println!("репозиториев не настроено; добавьте: oparysh repo add <name> <url|path>");
+        println!(
+            "{}",
+            t(
+                "репозиториев не настроено; добавьте: oparysh repo add <name> <url|path>",
+                "no repositories configured; add one: oparysh repo add <name> <url|path>"
+            )
+        );
         return;
     }
-    println!("{name:<16} {source:<48} {pkgs:>8}  {updated}",
-        name = "ИМЯ", source = "ИСТОЧНИК", pkgs = "ПАКЕТОВ", updated = "ОБНОВЛЁН");
+    println!(
+        "{name:<16} {source:<48} {pkgs:>8}  {updated}",
+        name = t("ИМЯ", "NAME"),
+        source = t("ИСТОЧНИК", "SOURCE"),
+        pkgs = t("ПАКЕТОВ", "PKG COUNT"),
+        updated = t("ОБНОВЛЁН", "UPDATED")
+    );
     for entry in entries {
         let (source, pkgs, updated) = repo_status(entry, &cache);
         println!("{:<16} {:<48} {:>8}  {}", entry.name, source, pkgs, updated);
@@ -768,28 +930,32 @@ fn run_repo_list() {
 }
 
 #[derive(Parser)]
-#[command(name = "oparysh", version, about = "Source-based package manager")]
+#[command(name = "oparysh", version, about = t("Пакетный менеджер из исходников", "Source-based package manager"))]
 struct Cli {
-    /// Путь к конфигу (по умолчанию /etc/oparysh/oparysh.conf или $OPARYSH_CONFIG)
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH",
+        help = t("Путь к конфигу (по умолчанию /etc/oparysh/oparysh.conf или $OPARYSH_CONFIG)",
+                 "Path to config (default /etc/oparysh/oparysh.conf or $OPARYSH_CONFIG)"))]
     config: Option<PathBuf>,
-    /// Перекрыть `db_dir` (как OPARYSH_DB_DIR)
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH",
+        help = t("Перекрыть `db_dir` (как OPARYSH_DB_DIR)", "Override `db_dir` (like OPARYSH_DB_DIR)"))]
     db_dir: Option<PathBuf>,
-    /// Перекрыть `cache_dir` (как OPARYSH_CACHE_DIR)
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH",
+        help = t("Перекрыть `cache_dir` (как OPARYSH_CACHE_DIR)", "Override `cache_dir` (like OPARYSH_CACHE_DIR)"))]
     cache_dir: Option<PathBuf>,
-    /// Установить в другой корень — chroot-установка (как OPARYSH_ROOT)
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH",
+        help = t("Установить в другой корень — chroot-установка (как OPARYSH_ROOT)",
+                 "Install into another root — chroot install (like OPARYSH_ROOT)"))]
     root: Option<PathBuf>,
-    /// Перекрыть число заданий сборки (как OPARYSH_JOBS)
-    #[arg(long, global = true, value_name = "N")]
+    #[arg(long, global = true, value_name = "N",
+        help = t("Перекрыть число заданий сборки (как OPARYSH_JOBS)",
+                 "Override build job count (like OPARYSH_JOBS)"))]
     jobs: Option<u32>,
-    /// Подробная диагностика в stderr
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true,
+        help = t("Подробная диагностика в stderr", "Verbose diagnostics to stderr"))]
     verbose: bool,
-    /// Не спрашивать подтверждение у команд, которые его поддерживают
-    #[arg(long, global = true)]
+    #[arg(long, global = true,
+        help = t("Не спрашивать подтверждение у команд, которые его поддерживают",
+                 "Do not ask for confirmation from commands that support it"))]
     yes: bool,
     #[command(subcommand)]
     command: Option<Command>,
@@ -797,229 +963,262 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Сверить установленные файлы с БД (sha256): removed | modified | new (этап 11.1/11.6)
+    #[command(about = t("Проверить установленные файлы по БД (sha256): removed | modified | new",
+                        "Check installed files against the DB (sha256): removed | modified | new"))]
     Check {
-        /// Пакеты для проверки; пусто — все установленные (полный аудит)
-        #[arg(value_name = "PKG")]
+        #[arg(value_name = "PKG",
+            help = t("Пакеты для проверки; пусто — все установленные (полный аудит)",
+                     "Packages to check; empty — all installed (full audit)"))]
         pkgs: Vec<String>,
     },
-    /// Verify a tarball's SHA-256 (stage 2)
+    #[command(about = t("Проверить SHA-256 тарбола", "Verify a tarball's SHA-256"))]
     Verify {
-        /// Путь к тарболу для проверки
+        #[arg(help = t("Путь к тарболу для проверки", "Path to the tarball to verify"))]
         tarball: PathBuf,
-        /// Ожидаемый SHA-256 (hex). Если не указан — вычисляется и печатается.
-        #[arg(short, long)]
+        #[arg(short, long,
+            help = t("Ожидаемый SHA-256 (hex). Если не указан — вычисляется и печатается.",
+                     "Expected SHA-256 (hex). If omitted — computed and printed."))]
         expected: Option<String>,
     },
-    /// Восстановить базу данных из резервной копии db.sqlite.bak (stage 3.6)
+    #[command(about = t("Восстановить базу данных из резервной копии db.sqlite.bak",
+                        "Restore the database from the db.sqlite.bak backup"))]
     RebuildDb {
-        /// Директория базы (по умолчанию — из конфига/OPARYSH_DB_DIR)
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH",
+            help = t("Директория базы (по умолчанию — из конфига/OPARYSH_DB_DIR)",
+                     "Database directory (default — from config/OPARYSH_DB_DIR)"))]
         db_dir: Option<PathBuf>,
     },
-    /// Скачать/обновить index.toml всех (или указанных) репозиториев (stage 4.4)
+    #[command(about = t("Скачать/обновить index.toml всех (или указанных) репозиториев",
+                        "Download/update index.toml of all (or listed) repositories"))]
     Sync {
-        /// Ограничить синхронизацию перечисленными репозиториями
-        #[arg(value_name = "REPO")]
+        #[arg(value_name = "REPO",
+            help = t("Ограничить синхронизацию перечисленными репозиториями",
+                     "Limit the sync to the listed repositories"))]
         repos: Vec<String>,
     },
-    /// Поиск по имени/описанию/тегам (glob или /regex/) (stage 4.6)
+    #[command(about = t("Поиск по имени/описанию/тегам (glob или /regex/)",
+                        "Search by name/description/tags (glob or /regex/)"))]
     Search {
-        /// Шаблон: glob (`gcc*`, `*-git`) или регулярное выражение в слэшах (`/^lib.*/`)
+        #[arg(help = t("Шаблон: glob (`gcc*`, `*-git`) или регулярное выражение в слэшах (`/^lib.*/`)",
+                       "Pattern: glob (`gcc*`, `*-git`) or slash-delimited regex (`/^lib.*/`)"))]
         pattern: String,
     },
-    /// Показать метаданные пакета: зависимости, provides, версию, репозиторий (stage 4.7)
+    #[command(about = t("Показать метаданные пакета: зависимости, provides, версию, репозиторий",
+                        "Show package metadata: deps, provides, version, repository"))]
     Info {
-        /// Пакет в виде `pkg` или `pkg@ver`
+        #[arg(help = t("Пакет в виде `pkg` или `pkg@ver`", "Package as `pkg` or `pkg@ver`"))]
         pkg: String,
     },
-    /// Список установленных/доступных пакетов (stage 4.7)
+    #[command(about = t("Список установленных/доступных пакетов",
+                        "List installed/available packages"))]
     #[command(group = clap::ArgGroup::new("list_scope").multiple(false)
         .args(["installed", "available", "outdated", "orphaned"]))]
     List {
-        /// Только установленные пакеты (по умолчанию)
-        #[arg(long)]
+        #[arg(long, help = t("Только установленные пакеты (по умолчанию)",
+                             "Only installed packages (default)"))]
         installed: bool,
-        /// Все пакеты из репозиториев
-        #[arg(long)]
+        #[arg(long, help = t("Все пакеты из репозиториев", "All packages from repositories"))]
         available: bool,
-        /// Установленные пакеты с более свежей версией в репозитории
-        #[arg(long)]
+        #[arg(long, help = t("Установленные пакеты с более свежей версией в репозитории",
+                             "Installed packages with a newer version in the repository"))]
         outdated: bool,
-        /// Установленные пакеты, от которых никто не зависит
-        #[arg(long)]
+        #[arg(long, help = t("Установленные пакеты, от которых никто не зависит",
+                             "Installed packages nothing depends on"))]
         orphaned: bool,
     },
-    /// Показать план разрешения зависимостей и запросить подтверждение (stage 5.7)
+    #[command(about = t("Показать план разрешения зависимостей и запросить подтверждение",
+                        "Show the dependency resolution plan and ask for confirmation"))]
     Plan {
-        /// Цели: `pkg`, `pkg@ver`, необязательные зависимости через `+feature`
-        #[arg(value_name = "PKG", required = true)]
+        #[arg(value_name = "PKG", required = true,
+            help = t("Цели: `pkg`, `pkg@ver`, необязательные зависимости через `+feature`",
+                     "Targets: `pkg`, `pkg@ver`, optional deps via `+feature`"))]
         specs: Vec<String>,
     },
-    /// Дерево или список зависимостей пакета (stage 5.8)
+    #[command(about = t("Дерево или список зависимостей пакета",
+                        "Package dependency tree or flat list"))]
     Deps {
-        /// Печатать дерево вместо плоского списка
-        #[arg(long)]
+        #[arg(long, help = t("Печатать дерево вместо плоского списка",
+                             "Print a tree instead of a flat list"))]
         tree: bool,
-        /// Пакет в виде `pkg` или `pkg@ver`
+        #[arg(help = t("Пакет в виде `pkg` или `pkg@ver`", "Package as `pkg` or `pkg@ver`"))]
         pkg: String,
     },
-    /// Обратные зависимости среди установленных пакетов (stage 5.8)
+    #[command(about = t("Обратные зависимости среди установленных пакетов",
+                        "Reverse dependencies among installed packages"))]
     Rdeps {
-        /// Пакет в виде `pkg` или `pkg@ver`
+        #[arg(help = t("Пакет в виде `pkg` или `pkg@ver`", "Package as `pkg` or `pkg@ver`"))]
         pkg: String,
     },
-    /// Объяснить, зачем установлен пакет (stage 5.8)
+    #[command(about = t("Объяснить, зачем установлен пакет",
+                        "Explain why a package is installed"))]
     Why {
-        /// Пакет в виде `pkg` или `pkg@ver`
+        #[arg(help = t("Пакет в виде `pkg` или `pkg@ver`", "Package as `pkg` or `pkg@ver`"))]
         pkg: String,
     },
-    /// Собрать пакет или рецепт из каталога, БЕЗ установки (stage 7.8)
+    #[command(about = t("Собрать пакет или рецепт из каталога, БЕЗ установки",
+                        "Build a package or recipe from a directory, WITHOUT installing"))]
     Build {
-        /// Пакет (`pkg`, `pkg@ver`) или каталог с рецептом (`pkg.toml`)
+        #[arg(help = t("Пакет (`pkg`, `pkg@ver`) или каталог с рецептом (`pkg.toml`)",
+                       "Package (`pkg`, `pkg@ver`) or directory with a recipe (`pkg.toml`)"))]
         target: String,
-        /// Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…` (stage 7.7)
-        #[arg(long = "set", value_name = "K=V")]
+        #[arg(long = "set", value_name = "K=V",
+            help = t("Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`",
+                     "Per-build flag overrides: `--set cflags=… --set cc=…`"))]
         sets: Vec<String>,
-        /// Перекрыть число заданий сборки (stage 7.7)
-        #[arg(long = "jobs", value_name = "N")]
+        #[arg(long = "jobs", value_name = "N",
+            help = t("Перекрыть число заданий сборки", "Override build job count"))]
         jobs: Option<u32>,
-        /// Установить пакет после успешной сборки (stage 8.1–8.4):
-        /// manifest scan → перенос в destroot → запись в БД
-        #[arg(long)]
+        #[arg(long,
+            help = t("Установить пакет после успешной сборки: manifest scan → перенос в destroot → запись в БД",
+                     "Install the package after a successful build: manifest scan → move to destroot → DB record"))]
         install: bool,
-        /// Незаявленные файлы (вне install.prefix) = ошибка (stage 8.2)
-        #[arg(long)]
+        #[arg(long, help = t("Незаявленные файлы (вне install.prefix) = ошибка",
+                             "Unmanifested files (outside install.prefix) = error"))]
         strict: bool,
-        /// Не удалять каталог сборки <db_dir>/build/ после установки
-        #[arg(long)]
+        #[arg(long, help = t("Не удалять каталог сборки <db_dir>/build/ после установки",
+                             "Keep the build dir <db_dir>/build/ after install"))]
         keep_build: bool,
     },
-    /// Разрешить зависимости, собрать и установить цели + build-зависимости (stage 8.6)
+    #[command(about = t("Разрешить зависимости, собрать и установить цели + build-зависимости",
+                        "Resolve deps, build and install targets + build deps"))]
     Install {
-        /// Цели: `pkg`, `pkg@ver`, необязательные зависимости через `+feature`;
-        /// не требуется при `--file`
-        #[arg(value_name = "PKG")]
+        #[arg(value_name = "PKG",
+            help = t("Цели: `pkg`, `pkg@ver`, необязательные зависимости через `+feature`; не требуется при `--file`",
+                     "Targets: `pkg`, `pkg@ver`, optional deps via `+feature`; not required with `--file`"))]
         specs: Vec<String>,
-        /// Установить из локального рецепта, минуя репозиторий (stage 8.5)
-        #[arg(long, value_name = "PKG_TOML")]
+        #[arg(long, value_name = "PKG_TOML",
+            help = t("Установить из локального рецепта, минуя репозиторий",
+                     "Install from a local recipe, bypassing the repository"))]
         file: Option<PathBuf>,
-        /// Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`
-        #[arg(long = "set", value_name = "K=V")]
+        #[arg(long = "set", value_name = "K=V",
+            help = t("Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`",
+                     "Per-build flag overrides: `--set cflags=… --set cc=…`"))]
         sets: Vec<String>,
-        /// Перекрыть число заданий сборки
-        #[arg(long = "jobs", value_name = "N")]
+        #[arg(long = "jobs", value_name = "N",
+            help = t("Перекрыть число заданий сборки", "Override build job count"))]
         jobs: Option<u32>,
-        /// Незаявленные файлы (вне install.prefix) = ошибка (stage 8.2)
-        #[arg(long)]
+        #[arg(long, help = t("Незаявленные файлы (вне install.prefix) = ошибка",
+                             "Unmanifested files (outside install.prefix) = error"))]
         strict: bool,
-        /// Не удалять каталог сборки <db_dir>/build/ после установки
-        #[arg(long)]
+        #[arg(long, help = t("Не удалять каталог сборки <db_dir>/build/ после установки",
+                             "Keep the build dir <db_dir>/build/ after install"))]
         keep_build: bool,
     },
-    /// Удалить установленные пакеты по манифесту файлов (stage 9.1–9.4)
+    #[command(about = t("Удалить установленные пакеты по манифесту файлов",
+                        "Remove installed packages via the file manifest"))]
     Remove {
-        /// Пакеты для удаления
-        #[arg(value_name = "PKG", required = true)]
+        #[arg(value_name = "PKG", required = true,
+            help = t("Пакеты для удаления", "Packages to remove"))]
         pkgs: Vec<String>,
-        /// Удалить даже при установленных обратных зависимостях (код 9 без флага)
-        #[arg(long)]
+        #[arg(long, help = t("Удалить даже при установленных обратных зависимостях (код 9 без флага)",
+                             "Remove even with installed reverse dependents (code 9 without the flag)"))]
         force: bool,
     },
-    /// Удалить пакеты-«сироты»: стояли как зависимости, никому не нужны (stage 9.3)
+    #[command(about = t("Удалить пакеты-«сироты»: стояли как зависимости, никому не нужны",
+                        "Remove orphaned packages: installed as deps, wanted by no one"))]
     Autoremove,
-    /// Обновить все или указанные установленные пакеты (stage 10.1)
+    #[command(about = t("Обновить все или указанные установленные пакеты",
+                        "Upgrade all or listed installed packages"))]
     Upgrade {
-        /// Пакеты для обновления; пусто — все установленные
-        #[arg(value_name = "PKG")]
+        #[arg(value_name = "PKG",
+            help = t("Пакеты для обновления; пусто — все установленные",
+                     "Packages to upgrade; empty — all installed"))]
         pkgs: Vec<String>,
-        /// Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`
-        #[arg(long = "set", value_name = "K=V")]
+        #[arg(long = "set", value_name = "K=V",
+            help = t("Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`",
+                     "Per-build flag overrides: `--set cflags=… --set cc=…`"))]
         sets: Vec<String>,
-        /// Перекрыть число заданий сборки
-        #[arg(long = "jobs", value_name = "N")]
+        #[arg(long = "jobs", value_name = "N",
+            help = t("Перекрыть число заданий сборки", "Override build job count"))]
         jobs: Option<u32>,
-        /// Незаявленные файлы (вне install.prefix) = ошибка (stage 8.2)
-        #[arg(long)]
+        #[arg(long, help = t("Незаявленные файлы (вне install.prefix) = ошибка",
+                             "Unmanifested files (outside install.prefix) = error"))]
         strict: bool,
-        /// Не удалять каталог сборки <db_dir>/build/ после установки
-        #[arg(long)]
+        #[arg(long, help = t("Не удалять каталог сборки <db_dir>/build/ после установки",
+                             "Keep the build dir <db_dir>/build/ after install"))]
         keep_build: bool,
     },
-    /// Откат пакета на конкретную версию из репо или кэша рецептов (stage 10.2)
+    #[command(about = t("Откат пакета на конкретную версию из репо или кэша рецептов",
+                        "Downgrade a package to a specific version from repo or recipe cache"))]
     Downgrade {
-        /// Пакет для отката
-        #[arg(value_name = "PKG")]
+        #[arg(value_name = "PKG", help = t("Пакет для отката", "Package to downgrade"))]
         pkg: String,
-        /// Целевая версия
-        #[arg(value_name = "VER")]
+        #[arg(value_name = "VER", help = t("Целевая версия", "Target version"))]
         ver: String,
-        /// Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`
-        #[arg(long = "set", value_name = "K=V")]
+        #[arg(long = "set", value_name = "K=V",
+            help = t("Перекрытия флагов на одну сборку: `--set cflags=… --set cc=…`",
+                     "Per-build flag overrides: `--set cflags=… --set cc=…`"))]
         sets: Vec<String>,
-        /// Перекрыть число заданий сборки
-        #[arg(long = "jobs", value_name = "N")]
+        #[arg(long = "jobs", value_name = "N",
+            help = t("Перекрыть число заданий сборки", "Override build job count"))]
         jobs: Option<u32>,
-        /// Незаявленные файлы (вне install.prefix) = ошибка (stage 8.2)
-        #[arg(long)]
+        #[arg(long, help = t("Незаявленные файлы (вне install.prefix) = ошибка",
+                             "Unmanifested files (outside install.prefix) = error"))]
         strict: bool,
-        /// Не удалять каталог сборки <db_dir>/build/ после установки
-        #[arg(long)]
+        #[arg(long, help = t("Не удалять каталог сборки <db_dir>/build/ после установки",
+                             "Keep the build dir <db_dir>/build/ after install"))]
         keep_build: bool,
     },
-    /// Журнал установок/обновлений/понижений/удалений (stage 10.3)
+    #[command(about = t("Журнал установок/обновлений/понижений/удалений",
+                        "Log of installs/upgrades/downgrades/removals"))]
     History {
-        /// Ограничить вывод одним пакетом
-        #[arg(value_name = "PKG")]
+        #[arg(value_name = "PKG", help = t("Ограничить вывод одним пакетом",
+                                           "Limit output to one package"))]
         pkg: Option<String>,
     },
-    /// Управление репозиториями в конфиге (stage 4.5)
+    #[command(about = t("Управление репозиториями в конфиге",
+                        "Manage repositories in the config"))]
     Repo {
         #[command(subcommand)]
         action: RepoCommand,
     },
-    /// Очистить кэши исходников/сборки/логов (stage 6.6)
+    #[command(about = t("Очистить кэши исходников/сборки/логов",
+                        "Clean source/build/log caches"))]
     #[command(group = clap::ArgGroup::new("clean_scope").required(true).multiple(false)
         .args(["src", "build", "logs", "all"]))]
     Clean {
-        /// Очистить кэш исходников <db_dir>/src/
-        #[arg(long)]
+        #[arg(long, help = t("Очистить кэш исходников <db_dir>/src/",
+                             "Clean the source cache <db_dir>/src/"))]
         src: bool,
-        /// Очистить рабочие каталоги сборки <db_dir>/build/
-        #[arg(long)]
+        #[arg(long, help = t("Очистить рабочие каталоги сборки <db_dir>/build/",
+                             "Clean build workdirs <db_dir>/build/"))]
         build: bool,
-        /// Очистить логи сборок <db_dir>/logs/
-        #[arg(long)]
+        #[arg(long, help = t("Очистить логи сборок <db_dir>/logs/",
+                             "Clean build logs <db_dir>/logs/"))]
         logs: bool,
-        /// Очистить всё: src + build + logs
-        #[arg(long)]
+        #[arg(long, help = t("Очистить всё: src + build + logs",
+                             "Clean everything: src + build + logs"))]
         all: bool,
     },
-    /// Генерировать скрипты автодополнения для оболочки (bash, zsh, fish, powershell)
+    #[command(about = t("Генерировать скрипты автодополнения для оболочки (bash, zsh, fish, powershell)",
+                        "Generate shell completion scripts (bash, zsh, fish, powershell)"))]
     Completions {
-        /// Shell: bash, zsh, fish, powershell
-        #[arg(value_enum)]
+        #[arg(value_enum,
+            help = t("Shell: bash, zsh, fish, powershell", "Shell: bash, zsh, fish, powershell"))]
         shell: clap_complete::Shell,
-        /// Путь для вывода (по умолчанию stdout)
-        #[arg(long, short = 'o', value_name = "PATH")]
+        #[arg(long, short = 'o', value_name = "PATH",
+            help = t("Путь для вывода (по умолчанию stdout)", "Output path (default stdout)"))]
         output: Option<PathBuf>,
     },
 }
 
 #[derive(clap::Subcommand)]
 enum RepoCommand {
-    /// Добавить репозиторий в конфиг (url или путь к локальному каталогу)
+    #[command(about = t("Добавить репозиторий в конфиг (url или путь к локальному каталогу)",
+                        "Add a repository to the config (url or path to a local directory)"))]
     Add {
-        /// Имя репозитория
+        #[arg(help = t("Имя репозитория", "Repository name"))]
         name: String,
-        /// URL (https://…) или путь к локальному каталогу-репозиторию
+        #[arg(help = t("URL (https://…) или путь к локальному каталогу-репозиторию",
+                       "URL (https://…) or path to a local repo directory"))]
         target: String,
     },
-    /// Показать репозитории, кол-во пакетов, дату обновления
+    #[command(about = t("Показать репозитории, кол-во пакетов, дату обновления",
+                        "Show repositories, package counts, update date"))]
     List,
-    /// Убрать репозиторий из конфига
+    #[command(about = t("Убрать репозиторий из конфига", "Remove a repository from the config"))]
     Del {
-        /// Имя репозитория
+        #[arg(help = t("Имя репозитория", "Repository name"))]
         name: String,
     },
 }
@@ -1081,7 +1280,13 @@ fn run_check(pkgs: &[String]) {
             match installed.iter().find(|p| &p.name == name) {
                 Some(p) => out.push(p.clone()),
                 None => {
-                    eprintln!("ERROR: пакет `{name}` не установлен");
+                    eprintln!(
+                        "{}",
+                        t(
+                            &format!("ERROR: пакет `{name}` не установлен"),
+                            &format!("ERROR: package `{name}` is not installed")
+                        )
+                    );
                     std::process::exit(3);
                 }
             }
@@ -1089,7 +1294,7 @@ fn run_check(pkgs: &[String]) {
         out
     };
     if targets.is_empty() {
-        println!("нет установленных пакетов");
+        println!("{}", t("нет установленных пакетов", "no installed packages"));
         return;
     }
 
@@ -1124,7 +1329,12 @@ fn run_check(pkgs: &[String]) {
                     issues += 1;
                 }
                 Err(_) => {
-                    println!("  {} {} (не читается)", style::red("modified"), f.path);
+                    println!(
+                        "  {} {} ({})",
+                        style::red("modified"),
+                        f.path,
+                        t("не читается", "unreadable")
+                    );
                     issues += 1;
                 }
             }
@@ -1158,11 +1368,19 @@ fn run_check(pkgs: &[String]) {
     }
 
     if issues == 0 {
-        println!("{} ({} файлов)", style::green("все файлы целы"), checked);
+        println!(
+            "{} ({})",
+            style::green(&t("все файлы целы", "all files intact")),
+            t(&format!("{} файлов", checked), &format!("{} files", checked))
+        );
     } else {
         eprintln!(
-            "{}: расхождений: {issues} (проверено файлов: {checked})",
-            style::red("check failed")
+            "{}: {}",
+            style::red("check failed"),
+            t(
+                &format!("расхождений: {issues} (проверено файлов: {checked})"),
+                &format!("mismatches: {issues} (files checked: {checked})")
+            )
         );
         std::process::exit(1);
     }
@@ -1186,9 +1404,22 @@ fn run_clean(db: &Path, src: bool, build: bool, logs: bool) {
         }
         let bytes = dir_size(&dir).unwrap_or(0);
         match std::fs::remove_dir_all(&dir) {
-            Ok(()) => println!("clean {flag:<5} {} — освобождено {} байт", dir.display(), bytes),
+            Ok(()) => println!(
+                "clean {flag:<5} {} {}",
+                dir.display(),
+                t(
+                    &format!("— освобождено {bytes} байт"),
+                    &format!("— freed {bytes} bytes")
+                )
+            ),
             Err(e) => {
-                eprintln!("ERROR: не удалось удалить {}: {e}", dir.display());
+                eprintln!(
+                    "{}",
+                    t(
+                        &format!("ERROR: не удалось удалить {}: {e}", dir.display()),
+                        &format!("ERROR: failed to remove {}: {e}", dir.display())
+                    )
+                );
                 std::process::exit(1);
             }
         }
@@ -1259,7 +1490,13 @@ fn build_target(target: &str, config: &OparyshConfig, _assume_yes: bool) -> Resu
         }
     };
     let Some(candidate) = oparysh_resolver::select_latest_satisfying(&candidates, &dep) else {
-        eprintln!("ERROR: пакет `{target}` не найден ни в одном репозитории");
+        eprintln!(
+            "{}",
+            t(
+                &format!("ERROR: пакет `{target}` не найден ни в одном репозитории"),
+                &format!("ERROR: package `{target}` not found in any repository")
+            )
+        );
         return Err(3);
     };
     target_from_candidate(&source, candidate)
@@ -1274,7 +1511,13 @@ fn target_from_candidate(
     let recipe = match oparysh_resolver::PackageSource::recipe(source, candidate) {
         Ok(recipe) => recipe,
         Err(e) => {
-            eprintln!("ERROR: не удалось получить рецепт `{}`: {e}", candidate.name);
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: не удалось получить рецепт `{}`: {e}", candidate.name),
+                    &format!("ERROR: failed to fetch recipe `{}`: {e}", candidate.name)
+                )
+            );
             return Err(resolve_exit_code(&e));
         }
     };
@@ -1301,14 +1544,26 @@ fn local_recipe_target(path: &Path) -> Result<BuildTarget, i32> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) => {
-            eprintln!("ERROR: не удалось прочитать {}: {e}", path.display());
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: не удалось прочитать {}: {e}", path.display()),
+                    &format!("ERROR: failed to read {}: {e}", path.display())
+                )
+            );
             return Err(1);
         }
     };
     let recipe = match oparysh_core::recipe::Recipe::parse(&raw) {
         Ok(recipe) => recipe,
         Err(e) => {
-            eprintln!("ERROR: не удалось разобрать {}: {e}", path.display());
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: не удалось разобрать {}: {e}", path.display()),
+                    &format!("ERROR: failed to parse {}: {e}", path.display())
+                )
+            );
             return Err(1);
         }
     };
@@ -1446,7 +1701,13 @@ fn build_package(
     // Псевдо-DESTDIR: результат install-шагов остаётся в tmp/, не устанавливается.
     let destdir = oparysh_installer::destdir(&db, &target.name, &target.version);
     if let Err(e) = oparysh_installer::prepare_destdir(&destdir) {
-        eprintln!("ERROR: не удалось подготовить {}: {e}", destdir.display());
+        eprintln!(
+            "{}",
+            t(
+                &format!("ERROR: не удалось подготовить {}: {e}", destdir.display()),
+                &format!("ERROR: failed to prepare {}: {e}", destdir.display())
+            )
+        );
         return Err(1);
     }
 
@@ -1465,7 +1726,10 @@ fn build_package(
     };
 
     if !overrides.sets.is_empty() || overrides.jobs.is_some() {
-        println!("Перекрытия (только на эту сборку):");
+        println!(
+            "{}",
+            t("Перекрытия (только на эту сборку):", "Overrides (this build only):")
+        );
         for (key, value) in &overrides.sets {
             println!("  {key} = {value}");
         }
@@ -1474,18 +1738,37 @@ fn build_package(
         }
     }
     println!(
-        "Сборка {} {} (система {}): {} шагов, лог {}",
-        target.name,
-        target.version,
-        plan.system,
-        plan.steps.len(),
-        oparysh_builder::today_log_path(&db, &target.name, &target.version).display()
+        "{}",
+        t(
+            &format!(
+                "Сборка {} {} (система {}): {} шагов, лог {}",
+                target.name,
+                target.version,
+                plan.system,
+                plan.steps.len(),
+                oparysh_builder::today_log_path(&db, &target.name, &target.version).display()
+            ),
+            &format!(
+                "Build {} {} (system {}): {} steps, log {}",
+                target.name,
+                target.version,
+                plan.system,
+                plan.steps.len(),
+                oparysh_builder::today_log_path(&db, &target.name, &target.version).display()
+            )
+        )
     );
 
     let log_path = oparysh_builder::today_log_path(&db, &target.name, &target.version);
     if let Some(parent) = log_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("ERROR: не удалось создать {}: {e}", parent.display());
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: не удалось создать {}: {e}", parent.display()),
+                    &format!("ERROR: failed to create {}: {e}", parent.display())
+                )
+            );
             return Err(1);
         }
     }
@@ -1496,7 +1779,13 @@ fn build_package(
     let mut log = match log {
         Ok(log) => log,
         Err(e) => {
-            eprintln!("ERROR: не удалось открыть {}: {e}", log_path.display());
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: не удалось открыть {}: {e}", log_path.display()),
+                    &format!("ERROR: failed to open {}: {e}", log_path.display())
+                )
+            );
             return Err(1);
         }
     };
@@ -1520,10 +1809,21 @@ fn build_package(
                 )
             } else {
                 println!(
-                    "Готово: {} {} собран, установка не выполнялась (DESTDIR {})",
-                    target.name,
-                    target.version,
-                    oparysh_installer::destdir(&db, &target.name, &target.version).display()
+                    "{}",
+                    t(
+                        &format!(
+                            "Готово: {} {} собран, установка не выполнялась (DESTDIR {})",
+                            target.name,
+                            target.version,
+                            oparysh_installer::destdir(&db, &target.name, &target.version).display()
+                        ),
+                        &format!(
+                            "Done: {} {} built, not installed (DESTDIR {})",
+                            target.name,
+                            target.version,
+                            oparysh_installer::destdir(&db, &target.name, &target.version).display()
+                        )
+                    )
                 );
                 Ok(())
             }
@@ -1565,7 +1865,13 @@ fn install_built(
         }
     };
     if manifest.is_empty {
-        eprintln!("ERROR: DESTDIR {} пуст — нечего устанавливать", destdir.display());
+        eprintln!(
+            "{}",
+            t(
+                &format!("ERROR: DESTDIR {} пуст — нечего устанавливать", destdir.display()),
+                &format!("ERROR: DESTDIR {} is empty — nothing to install", destdir.display())
+            )
+        );
         return Err(1);
     }
     if let Err(e) = oparysh_installer::move_to_destroot(&manifest) {
@@ -1630,16 +1936,30 @@ fn install_built(
         outcome.build_rev,
         event_detail,
     ) {
-        eprintln!("WARN: не удалось записать событие в журнал: {e}");
+        eprintln!("{}", t(&format!("WARN: не удалось записать событие в журнал: {e}"), &format!("WARN: failed to record event in the log: {e}")));
     }
     println!(
-        "Установлено: {} {} (build {}) — файлов {}, {} байт (destroot {})",
-        outcome.name,
-        outcome.version,
-        outcome.build_rev,
-        outcome.files,
-        outcome.size_bytes,
-        destroot.display()
+        "{}",
+        t(
+            &format!(
+                "Установлено: {} {} (build {}) — файлов {}, {} байт (destroot {})",
+                outcome.name,
+                outcome.version,
+                outcome.build_rev,
+                outcome.files,
+                outcome.size_bytes,
+                destroot.display()
+            ),
+            &format!(
+                "Installed: {} {} (build {}) — {} files, {} bytes (destroot {})",
+                outcome.name,
+                outcome.version,
+                outcome.build_rev,
+                outcome.files,
+                outcome.size_bytes,
+                destroot.display()
+            )
+        )
     );
 
     let keep = keep_build || config.general.keep_build;
@@ -1647,17 +1967,32 @@ fn install_built(
         Ok(report) => {
             if report.build_removed {
                 println!(
-                    "cleanup: <db_dir>/build/{}-{} удалён",
-                    outcome.name, outcome.version
+                    "{}",
+                    t(
+                        &format!("cleanup: <db_dir>/build/{}-{} удалён", outcome.name, outcome.version),
+                        &format!("cleanup: <db_dir>/build/{}-{} removed", outcome.name, outcome.version)
+                    )
                 );
             }
             if report.destdir_removed {
-                println!("cleanup: {} удалён", destdir.display());
+                println!(
+                    "{}",
+                    t(
+                        &format!("cleanup: {} удалён", destdir.display()),
+                        &format!("cleanup: {} removed", destdir.display())
+                    )
+                );
             }
             if keep {
-                println!("cleanup: build/ сохранён (keep_build)");
+                println!("{}", t("cleanup: build/ сохранён (keep_build)", "cleanup: build/ kept (keep_build)"));
             }
-            println!("Рецепт: {}", cached.display());
+            println!(
+                "{}",
+                t(
+                    &format!("Рецепт: {}", cached.display()),
+                    &format!("Recipe: {}", cached.display())
+                )
+            );
             Ok(())
         }
         Err(e) => {
@@ -1751,7 +2086,13 @@ fn run_install(
         Err(code) => std::process::exit(code),
     });
     if file_target.is_none() && specs.is_empty() {
-        eprintln!("ERROR: укажите хотя бы один пакет или --file <pkg.toml>");
+        eprintln!(
+            "{}",
+            t(
+                &format!("ERROR: укажите хотя бы один пакет или --file <pkg.toml>"),
+                &format!("ERROR: specify at least one package or --file <pkg.toml>")
+            )
+        );
         std::process::exit(2);
     }
 
@@ -1782,8 +2123,11 @@ fn run_install(
     if let Some(target) = &file_target {
         if set.nodes.contains_key(&target.name) {
             eprintln!(
-                "ERROR: пакет {} также присутствует в разрешённом графе; --file для него не поддерживается",
-                target.name
+                "{}",
+                t(
+                    &format!("ERROR: пакет {} также присутствует в разрешённом графе; --file для него не поддерживается", target.name),
+                    &format!("ERROR: package {} is also present in the resolved graph; --file is not supported for it", target.name)
+                )
             );
             std::process::exit(2);
         }
@@ -1793,7 +2137,7 @@ fn run_install(
     let sizes = source_sizes(&set, &source);
     let plan = render_plan(&set, config.general.jobs, &sizes);
     if !confirm_plan(&plan, assume_yes) {
-        println!("Отменено; изменения не внесены");
+        println!("{}", t("Отменено; изменения не внесены", "Cancelled; no changes made"));
         return;
     }
 
@@ -1823,13 +2167,19 @@ fn run_install(
         };
         if let Err(code) = result {
             eprintln!(
-                "ERROR: установка прервана на пакете {}; ранее установленные пакеты остаются в системе",
-                name
+                "{}",
+                t(
+                    &format!("ERROR: установка прервана на пакете {}; ранее установленные пакеты остаются в системе", name),
+                    &format!("ERROR: installation aborted on package {}; previously installed packages are left in place", name)
+                )
             );
             std::process::exit(code);
         }
     }
-    println!("\nГотово: установлено пакетов: {total}");
+    println!(
+        "{}",
+        t(&format!("Готово: установлено пакетов: {total}"), &format!("Done: installed packages: {total}"))
+    );
 }
 
 /// `oparysh remove <pkg…> [--force]` (9.1–9.4): удалить пакеты по манифесту.
@@ -1846,7 +2196,13 @@ fn run_remove(pkgs: &[String], force: bool) {
         match db.get_package(name) {
             Ok(Some(_)) => {}
             Ok(None) => {
-                eprintln!("ERROR: пакет `{name}` не установлен");
+                eprintln!(
+                    "{}",
+                    t(
+                        &format!("ERROR: пакет `{name}` не установлен"),
+                        &format!("ERROR: package `{name}` is not installed")
+                    )
+                );
                 std::process::exit(3);
             }
             Err(e) => {
@@ -1858,10 +2214,19 @@ fn run_remove(pkgs: &[String], force: bool) {
             match db.reverse_deps(name) {
                 Ok(rdeps) if !rdeps.is_empty() => {
                     eprintln!(
-                        "ERROR: отказ: пакет `{name}` нужен установленным пакетам: {}",
-                        rdeps.join(", ")
+                        "{}",
+                        t(
+                            &format!("ERROR: отказ: пакет `{name}` нужен установленным пакетам: {}", rdeps.join(", ")),
+                            &format!("ERROR: refusing: package `{name}` is needed by installed packages: {}", rdeps.join(", "))
+                        )
                     );
-                    eprintln!("используйте `oparysh remove --force {name}` для принудительного удаления");
+                    eprintln!(
+                        "{}",
+                        t(
+                            &format!("используйте `oparysh remove --force {name}` для принудительного удаления"),
+                            &format!("use `oparysh remove --force {name}` to force removal")
+                        )
+                    );
                     std::process::exit(9);
                 }
                 Ok(_) => {}
@@ -1878,28 +2243,53 @@ fn run_remove(pkgs: &[String], force: bool) {
         match oparysh_installer::remove_package(&mut db, &db_dir, &destroot, name, force) {
             Ok(outcome) => {
                 if let Err(e) = db.record_event("remove", &outcome.name, &outcome.version, 0, "") {
-                    eprintln!("WARN: не удалось записать событие в журнал: {e}");
+                    eprintln!("{}", t(&format!("WARN: не удалось записать событие в журнал: {e}"), &format!("WARN: failed to record event in the log: {e}")));
                 }
                 println!(
-                    "Удалён: {} {} — файлов удалено: {}{}",
-                    outcome.name,
-                    outcome.version,
-                    outcome.files_removed,
-                    if outcome.missing.is_empty() {
-                        String::new()
-                    } else {
-                        format!(", отсутствовало на диске: {}", outcome.missing.len())
-                    }
+                    "{}",
+                    t(
+                        &format!(
+                            "Удалён: {} {} — файлов удалено: {}{}",
+                            outcome.name,
+                            outcome.version,
+                            outcome.files_removed,
+                            if outcome.missing.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", отсутствовало на диске: {}", outcome.missing.len())
+                            }
+                        ),
+                        &format!(
+                            "Removed: {} {} — files removed: {}{}",
+                            outcome.name,
+                            outcome.version,
+                            outcome.files_removed,
+                            if outcome.missing.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", missing on disk: {}", outcome.missing.len())
+                            }
+                        )
+                    )
                 );
                 if !outcome.forced_rdeps.is_empty() {
                     println!(
-                        "WARN: --force: оставлены установленные обратные зависимости: {}",
-                        outcome.forced_rdeps.join(", ")
+                        "{}",
+                        t(
+                            &format!("WARN: --force: оставлены установленные обратные зависимости: {}", outcome.forced_rdeps.join(", ")),
+                            &format!("WARN: --force: installed reverse dependents are left in place: {}", outcome.forced_rdeps.join(", "))
+                        )
                     );
                 }
                 if !outcome.missing.is_empty() {
                     for path in &outcome.missing {
-                        eprintln!("WARN: файл из манифеста отсутствовал: {path}");
+                        eprintln!(
+                            "{}",
+                            t(
+                                &format!("WARN: файл из манифеста отсутствовал: {path}"),
+                                &format!("WARN: manifest file was missing: {path}")
+                            )
+                        );
                     }
                 }
             }
@@ -1928,29 +2318,38 @@ fn run_autoremove(assume_yes: bool) {
         }
     };
     if candidates.is_empty() {
-        println!("сирот не найдено");
+        println!("{}", t("сирот не найдено", "no orphans found"));
         return;
     }
-    let mut plan = String::from("Будут удалены пакеты-сироты:\n");
+    let mut plan = String::from(&t("Будут удалены пакеты-сироты:\n", "The following orphaned packages will be removed:\n"));
     for name in &candidates {
         plan.push_str(&format!("  - {name}\n"));
     }
     if !confirm_plan(plan.trim_end(), assume_yes) {
-        println!("Отменено; изменения не внесены");
+        println!("{}", t("Отменено; изменения не внесены", "Cancelled; no changes made"));
         return;
     }
     match oparysh_installer::autoremove(&mut db, &db_dir, &destroot) {
         Ok(outcomes) => {
             for outcome in &outcomes {
                 if let Err(e) = db.record_event("autoremove", &outcome.name, &outcome.version, 0, "") {
-                    eprintln!("WARN: не удалось записать событие в журнал: {e}");
+                    eprintln!("{}", t(&format!("WARN: не удалось записать событие в журнал: {e}"), &format!("WARN: failed to record event in the log: {e}")));
                 }
                 println!(
-                    "Удалён: {} {} — файлов удалено: {}",
-                    outcome.name, outcome.version, outcome.files_removed
+                    "{}",
+                    t(
+                        &format!("Удалён: {} {} — файлов удалено: {}", outcome.name, outcome.version, outcome.files_removed),
+                        &format!("Removed: {} {} — files removed: {}", outcome.name, outcome.version, outcome.files_removed)
+                    )
                 );
             }
-            println!("Готово: удалено пакетов: {}", outcomes.len());
+            println!(
+                "{}",
+                t(
+                    &format!("Готово: удалено пакетов: {}", outcomes.len()),
+                    &format!("Done: removed packages: {}", outcomes.len())
+                )
+            );
         }
         Err(e) => {
             eprintln!("ERROR: {e}");
@@ -1978,7 +2377,13 @@ fn latest_candidate(
     oparysh_resolver::select_latest_satisfying(&candidates, &dep)
         .cloned()
         .ok_or_else(|| {
-            eprintln!("ERROR: пакет `{name}` не найден ни в одном репозитории");
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: пакет `{name}` не найден ни в одном репозитории"),
+                    &format!("ERROR: package `{name}` not found in any repository")
+                )
+            );
             3
         })
 }
@@ -2000,7 +2405,13 @@ fn exact_candidate(
         .into_iter()
         .find(|c| c.version_str == version)
         .ok_or_else(|| {
-            eprintln!("ERROR: версия `{version}` пакета `{name}` не найдена ни в одном репозитории");
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: версия `{version}` пакета `{name}` не найдена ни в одном репозитории"),
+                    &format!("ERROR: version `{version}` of package `{name}` not found in any repository")
+                )
+            );
             3
         })
 }
@@ -2077,7 +2488,7 @@ fn run_upgrade(
         }
     };
     if installed.is_empty() {
-        println!("нет установленных пакетов");
+        println!("{}", t("нет установленных пакетов", "no installed packages"));
         return;
     }
 
@@ -2090,7 +2501,13 @@ fn run_upgrade(
             match installed.iter().find(|p| &p.name == name) {
                 Some(p) => out.push(p.clone()),
                 None => {
-                    eprintln!("ERROR: пакет `{name}` не установлен");
+                    eprintln!(
+                        "{}",
+                        t(
+                            &format!("ERROR: пакет `{name}` не установлен"),
+                            &format!("ERROR: package `{name}` is not installed")
+                        )
+                    );
                     std::process::exit(3);
                 }
             }
@@ -2120,7 +2537,13 @@ fn run_upgrade(
                 }
             }
             Err(_) => {
-                eprintln!("WARN: пакет `{}` не найден ни в одном репозитории; пропущен", target.name);
+                eprintln!(
+                    "{}",
+                    t(
+                        &format!("WARN: пакет `{}` не найден ни в одном репозитории; пропущен", target.name),
+                        &format!("WARN: package `{}` not found in any repository; skipped", target.name)
+                    )
+                );
             }
         }
     }
@@ -2146,7 +2569,7 @@ fn run_upgrade(
     }
 
     if rebuild.is_empty() {
-        println!("все установленные пакеты актуальны");
+        println!("{}", t("все установленные пакеты актуальны", "all installed packages are up to date"));
         return;
     }
 
@@ -2155,7 +2578,7 @@ fn run_upgrade(
         installed.iter().map(|p| (p.name.as_str(), p)).collect();
 
     // План до начала работ.
-    let mut plan = String::from("Будут обновлены/пересобраны пакеты:\n");
+    let mut plan = String::from(&t("Будут обновлены/пересобраны пакеты:\n", "The following packages will be upgraded/rebuilt:\n"));
     for name in &order {
         let cur = installed_map[name.as_str()];
         match upgrade_to.get(name) {
@@ -2163,16 +2586,26 @@ fn run_upgrade(
                 "  - {name} {old} -> {new_ver}\n",
                 old = cur.version
             )),
-            None => plan.push_str(&format!(
-                "  - {name} {ver} (пересборка, build {b} -> {next})\n",
-                ver = cur.version,
-                b = cur.build_rev,
-                next = cur.build_rev + 1
-            )),
+            None => plan.push_str(
+                &t(
+                    &format!(
+                        "  - {name} {ver} (пересборка, build {b} -> {next})\n",
+                        ver = cur.version,
+                        b = cur.build_rev,
+                        next = cur.build_rev + 1
+                    ),
+                    &format!(
+                        "  - {name} {ver} (rebuild, build {b} -> {next})\n",
+                        ver = cur.version,
+                        b = cur.build_rev,
+                        next = cur.build_rev + 1
+                    ),
+                ),
+            ),
         }
     }
     if !confirm_plan(plan.trim_end(), assume_yes) {
-        println!("Отменено; изменения не внесены");
+        println!("{}", t("Отменено; изменения не внесены", "Cancelled; no changes made"));
         return;
     }
 
@@ -2213,12 +2646,22 @@ fn run_upgrade(
             &detail,
         ) {
             eprintln!(
-                "ERROR: обновление прервано на пакете {name}; ранее установленные пакеты остаются в системе"
+                "{}",
+                t(
+                    &format!("ERROR: обновление прервано на пакете {name}; ранее установленные пакеты остаются в системе", name = name),
+                    &format!("ERROR: upgrade aborted on package {name}; previously installed packages are left in place", name = name)
+                )
             );
             std::process::exit(code);
         }
     }
-    println!("\nГотово: обработано пакетов: {}", order.len());
+    println!(
+        "{}",
+        t(
+            &format!("\nГотово: обработано пакетов: {}", order.len()),
+            &format!("\nDone: processed packages: {}", order.len())
+        )
+    );
 }
 
 /// `oparysh downgrade <pkg> <ver>` (10.2): откат на конкретную версию из
@@ -2239,7 +2682,13 @@ fn run_downgrade(
     let installed = match db.get_package(pkg) {
         Ok(Some(p)) => p,
         Ok(None) => {
-            eprintln!("ERROR: пакет `{pkg}` не установлен");
+            eprintln!(
+                "{}",
+                t(
+                    &format!("ERROR: пакет `{pkg}` не установлен"),
+                    &format!("ERROR: package `{pkg}` is not installed")
+                )
+            );
             std::process::exit(3);
         }
         Err(e) => {
@@ -2248,7 +2697,13 @@ fn run_downgrade(
         }
     };
     if installed.version == ver {
-        println!("пакет `{pkg}` уже на версии {ver}");
+        println!(
+            "{}",
+            t(
+                &format!("пакет `{pkg}` уже на версии {ver}"),
+                &format!("package `{pkg}` is already at version {ver}")
+            )
+        );
         return;
     }
 
@@ -2272,7 +2727,13 @@ fn run_downgrade(
                 .join(ver)
                 .join("pkg.toml");
             if cached.is_file() {
-                eprintln!("WARN: версия {ver} не найдена в репозиториях; использую кэш {}", cached.display());
+                eprintln!(
+                    "{}",
+                    t(
+                        &format!("WARN: версия {ver} не найдена в репозиториях; использую кэш {}", cached.display()),
+                        &format!("WARN: version {ver} not found in repositories; using cache {}", cached.display())
+                    )
+                );
                 match local_recipe_target(&cached) {
                     Ok(t) => t,
                     Err(code) => std::process::exit(code),
@@ -2284,12 +2745,12 @@ fn run_downgrade(
         }
     };
 
-    let plan = format!(
-        "Будет выполнен откат: {pkg} {old} -> {ver}",
-        old = installed.version
+    let plan = t(
+        &format!("Будет выполнен откат: {pkg} {old} -> {ver}", old = installed.version),
+        &format!("Downgrade will be performed: {pkg} {old} -> {ver}", old = installed.version),
     );
     if !confirm_plan(&plan, assume_yes) {
-        println!("Отменено; изменения не внесены");
+        println!("{}", t("Отменено; изменения не внесены", "Cancelled; no changes made"));
         return;
     }
 
@@ -2330,14 +2791,25 @@ fn run_history(pkg: Option<&str>) {
     };
     if events.is_empty() {
         match pkg {
-            Some(name) => println!("нет событий для пакета `{name}`"),
-            None => println!("журнал пуст"),
+            Some(name) => println!(
+                "{}",
+                t(
+                    &format!("нет событий для пакета `{name}`"),
+                    &format!("no events for package `{name}`")
+                )
+            ),
+            None => println!("{}", t("журнал пуст", "log is empty")),
         }
         return;
     }
     println!(
-        "{time:<12} {action:<11} {pkg:<24} {version:<12} {build:>5}  ДЕТАЛИ",
-        time = "ВРЕМЯ", action = "ДЕЙСТВИЕ", pkg = "ПАКЕТ", version = "ВЕРСИЯ", build = "BUILD"
+        "{time:<12} {action:<11} {pkg:<24} {version:<12} {build:>5}  {details}",
+        time = t("ВРЕМЯ", "TIME"),
+        action = t("ДЕЙСТВИЕ", "ACTION"),
+        pkg = t("ПАКЕТ", "PACKAGE"),
+        version = t("ВЕРСИЯ", "VERSION"),
+        build = "BUILD",
+        details = t("ДЕТАЛИ", "DETAILS")
     );
     for e in &events {
         println!(
@@ -2362,10 +2834,18 @@ fn main() {
             .map(|s| (*s).to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned());
         let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
+        let location_suffix = location.map(|l| {
+            if lang_ru() { format!(" в {l}") } else { format!(" at {l}") }
+        }).unwrap_or_default();
+        let payload = payload.unwrap_or_else(|| {
+            if lang_ru() { "<неизвестная паника>".to_string() } else { "<unknown panic>".to_string() }
+        });
         eprintln!(
-            "ERROR: внутренняя ошибка oparysh (паника){}\n  подробности: {:?}\n  сообщите об этом в баг-репорт с выводом `oparysh --version` и логом сборки.",
-            location.map(|l| format!(" в {}", l)).unwrap_or_default(),
-            payload.unwrap_or_else(|| "<неизвестная паника>".to_string())
+            "{}",
+            t(
+                &format!("ERROR: внутренняя ошибка oparysh (паника){}\n  подробности: {:?}\n  сообщите об этом в баг-репорт с выводом `oparysh --version` и логом сборки.", location_suffix, payload),
+                &format!("ERROR: internal oparysh error (panic){}\n  details: {:?}\n  please report this bug with the output of `oparysh --version` and the build log.", location_suffix, payload)
+            )
         );
         process::exit(1);
     }));
@@ -2394,7 +2874,13 @@ fn main() {
             if let Some(expected) = expected {
                 match verify_tarball(Some(&expected), &tarball) {
                     Ok(()) => {
-                        println!("OK: {} — sha256 совпадает", tarball.display());
+                        println!(
+                            "{}",
+                            t(
+                                &format!("OK: {} — sha256 совпадает", tarball.display()),
+                                &format!("OK: {} — sha256 matches", tarball.display())
+                            )
+                        );
                     }
                     Err(e) => {
                         eprintln!("ERROR: {e}");
@@ -2418,7 +2904,13 @@ fn main() {
             let dir = dir.unwrap_or_else(|| db_dir(&load_config(None)));
             match rebuild_db_from_backup(&dir) {
                 Ok(bak) => {
-                    println!("База восстановлена из {}", bak.display());
+                    println!(
+                        "{}",
+                        t(
+                            &format!("База восстановлена из {}", bak.display()),
+                            &format!("Database restored from {}", bak.display())
+                        )
+                    );
                 }
                 Err(e) => {
                     eprintln!("ERROR: {e}");
@@ -2431,16 +2923,18 @@ fn main() {
                 for o in &outcomes {
                     match o.kind {
                         oparysh_repo::SyncKind::Local => println!(
-                            "local  {} — {} пакетов ({})",
-                            o.name,
-                            o.packages,
-                            o.index_path.display()
+                            "{}",
+                            t(
+                                &format!("local  {} — {} пакетов ({})", o.name, o.packages, o.index_path.display()),
+                                &format!("local  {} — {} packages ({})", o.name, o.packages, o.index_path.display())
+                            )
                         ),
                         oparysh_repo::SyncKind::Network => println!(
-                            "synced {} — {} пакетов ({})",
-                            o.name,
-                            o.packages,
-                            o.index_path.display()
+                            "{}",
+                            t(
+                                &format!("synced {} — {} пакетов ({})", o.name, o.packages, o.index_path.display()),
+                                &format!("synced {} — {} packages ({})", o.name, o.packages, o.index_path.display())
+                            )
                         ),
                     }
                 }
@@ -2453,13 +2947,30 @@ fn main() {
         Some(Command::Search { pattern }) => match run_search(&pattern) {
             Ok(outcome) => {
                 for (name, reason) in &outcome.skipped {
-                    eprintln!("WARN: репозиторий «{name}» пропущен: {reason}");
+                    eprintln!(
+            "{}",
+            t(
+                &format!("WARN: репозиторий «{name}» пропущен: {reason}"),
+                &format!("WARN: repository «{name}» skipped: {reason}")
+            )
+        );
                 }
                 if outcome.hits.is_empty() {
-                    println!("ничего не найдено по шаблону «{pattern}»");
+                    println!(
+                        "{}",
+                        t(
+                            &format!("ничего не найдено по шаблону «{pattern}»"),
+                            &format!("no matches for pattern «{pattern}»")
+                        )
+                    );
                 } else {
-                    println!("{name:<24} {version:<12} {repo:<16} ОПИСАНИЕ",
-                        name = "ИМЯ", version = "ВЕРСИЯ", repo = "РЕПО");
+                    println!(
+                        "{name:<24} {version:<12} {repo:<16} {desc}",
+                        name = t("ИМЯ", "NAME"),
+                        version = t("ВЕРСИЯ", "VERSION"),
+                        repo = t("РЕПО", "REPO"),
+                        desc = t("ОПИСАНИЕ", "DESCRIPTION")
+                    );
                     for h in &outcome.hits {
                         println!("{:<24} {:<12} {:<16} {}", h.name, h.version, h.repo, h.desc);
                     }
@@ -2489,7 +3000,10 @@ fn main() {
         Some(Command::Plan { specs }) => {
             let (specs, features) = split_plan_args(&specs);
             if specs.is_empty() {
-                eprintln!("ERROR: укажите хотя бы один пакет");
+                eprintln!(
+                    "{}",
+                    t("ERROR: укажите хотя бы один пакет", "ERROR: specify at least one package")
+                );
                 std::process::exit(2);
             }
             run_plan(&specs, &features, assume_yes);
@@ -2558,10 +3072,22 @@ fn main() {
                 let mut buf: Vec<u8> = Vec::new();
                 clap_complete::generate(shell, &mut cmd, bin_name, &mut buf);
                 std::fs::write(&path, &buf).unwrap_or_else(|e| {
-                    eprintln!("ERROR: не удалось записать {}: {e}", path.display());
+                    eprintln!(
+                        "{}",
+                        t(
+                            &format!("ERROR: не удалось записать {}: {e}", path.display()),
+                            &format!("ERROR: failed to write {}: {e}", path.display())
+                        )
+                    );
                     process::exit(1);
                 });
-                println!("Комплишены записаны в {}", path.display());
+                println!(
+                    "{}",
+                    t(
+                        &format!("Комплишены записаны в {}", path.display()),
+                        &format!("Completions written to {}", path.display())
+                    )
+                );
             } else {
                 clap_complete::generate(shell, &mut cmd, bin_name, &mut io::stdout());
             }
