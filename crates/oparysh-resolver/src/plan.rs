@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use oparysh_core::i18n::{t_lang, Lang};
+
 use crate::collect::RequirementSet;
 
 /// Порядок сборки: имена узлов, зависимости идут раньше зависящих.
@@ -94,32 +96,45 @@ pub fn render_plan(
     set: &RequirementSet,
     jobs: u32,
     sizes: &BTreeMap<String, Option<u64>>,
+    lang: Lang,
 ) -> String {
     let pending = pending_build_order(set);
+    let count = pending.len();
     let installed = set.nodes.values().filter(|n| n.installed).count();
     let mut out = String::new();
+    let ru = lang.is_ru();
     let _ = writeln!(
         out,
-        "The following {} package(s) will be BUILT, {} already INSTALLED:",
-        pending.len(),
-        installed
+        "{}",
+        t_lang(lang, 
+            &format!(
+                "Будет собрано пакетов: {count}, уже установлено: {installed}"
+            ),
+            &format!(
+                "The following {count} package(s) will be BUILT, {installed} already INSTALLED:"
+            )
+        )
     );
     if pending.is_empty() {
-        let _ = writeln!(out, "  (ничего собирать не нужно)");
+        let _ = writeln!(out, "  {}", t_lang(lang, "(ничего собирать не нужно)", "(nothing to build, all installed)"));
     } else {
         let _ = writeln!(out);
         for (index, name) in pending.iter().enumerate() {
             let node = &set.nodes[name];
             let reason = if node.is_target {
-                "target".to_string()
+                t_lang(lang, "цель", "target")
             } else {
                 let required_by = node
                     .required_by
                     .iter()
                     .filter_map(|(parent, _)| parent.as_deref())
                     .next()
-                    .unwrap_or("dependency");
-                format!("dep of {required_by}")
+                    .unwrap_or(if ru { "зависимость" } else { "dependency" });
+                if ru {
+                    format!("зависимость от {required_by}")
+                } else {
+                    format!("dep of {required_by}")
+                }
             };
             let virtual_note = node
                 .provided_for
@@ -142,12 +157,16 @@ pub fn render_plan(
         .sum();
     let unknown = pending.iter().any(|name| sizes.get(name).copied().flatten().is_none());
     let total = if unknown {
-        format!("{}+ (некоторые размеры неизвестны)", format_bytes(total_known))
+        format!(
+            "{}{}",
+            format_bytes(total_known),
+            t_lang(lang, "+ (некоторые размеры неизвестны)", "+ (some sizes unknown)")
+        )
     } else {
         format_bytes(total_known)
     };
     let _ = writeln!(out);
-    let _ = write!(out, "Total DL: {total}, build jobs: {jobs}.");
+    let _ = write!(out, "{}", t_lang(lang, &format!("К загрузке: {total}, заданий сборки: {jobs}."), &format!("Total DL: {total}, build jobs: {jobs}.")));
     out
 }
 

@@ -2,6 +2,7 @@ use clap::{CommandFactory, Parser};
 use oparysh_cli::style;
 use oparysh_core::config::OparyshConfig;
 use oparysh_core::config_edit;
+use oparysh_core::i18n::{t, Lang};
 use oparysh_db::{rebuild_db_from_backup, Database, Package};
 use oparysh_repo::RepoError;
 use oparysh_resolver::{plan::render_plan, RepoPackageSource, ResolveOptions};
@@ -11,32 +12,6 @@ use std::io;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process;
-
-
-static LANG_RU: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
-/// Русский ли язык интерфейса (LC_ALL / LC_MESSAGES / LANG)?
-fn lang_ru() -> bool {
-    *LANG_RU.get_or_init(|| {
-        for var in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-            if let Ok(l) = std::env::var(var) {
-                let l = l.trim().to_lowercase();
-                if l.is_empty() || l == "c" || l == "posix" {
-                    continue;
-                }
-                if l.starts_with("ru") {
-                    return true;
-                }
-            }
-        }
-        false
-    })
-}
-
-/// Строка интерфейса: LANG/LC_* `ru*` — русский, иначе английский.
-fn t(ru: impl AsRef<str>, en: impl AsRef<str>) -> String {
-    if lang_ru() { ru.as_ref().to_owned() } else { en.as_ref().to_owned() }
-}
 
 /// Код возврата для ошибки oparysh-repo по DOCS §11.
 fn repo_exit_code(e: &RepoError) -> i32 {
@@ -320,6 +295,7 @@ fn run_plan(specs: &[String], features: &[String], assume_yes: bool) {
         &set,
         config.general.jobs,
         &source_sizes(&set, &source),
+        Lang::current(),
     );
     if !confirm_plan(&plan, assume_yes) {
         println!("{}", t("Отменено; изменения не внесены", "Cancelled; no changes made"));
@@ -856,14 +832,23 @@ fn run_repo_add(name: &str, target: &str) -> Result<String, String> {
 }
 
 /// `oparysh repo del <name>`: убрать репозиторий из конфига.
-fn run_repo_del(name: &str) -> Result<String, String> {
+fn run_repo_del(name: &str) -> Result<String, RepoDelError> {
     let (path, text) = load_config_text();
-    let new_text = config_edit::remove_repository(&text, name).map_err(|e| e.to_string())?;
-    std::fs::write(&path, &new_text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let new_text = config_edit::remove_repository(&text, name).map_err(RepoDelError::Config)?;
+    std::fs::write(&path, &new_text)
+        .map_err(|e| RepoDelError::Io(path.clone(), e))?;
     Ok(t(
         &format!("репозиторий «{name}» убран из {}", path.display()),
         &format!("repository «{name}» removed from {}", path.display())
     ))
+}
+
+/// Ошибка `repo del`: типизированная, чтобы мапиться в коды возврата DOCS §11.
+enum RepoDelError {
+    /// Ошибка редактирования конфига (в т.ч. NotFound → код 3).
+    Config(oparysh_core::config_edit::ConfigEditError),
+    /// Не удалось записать конфиг на диск.
+    Io(PathBuf, io::Error),
 }
 
 /// Сведения об одном репозитории для `repo list`: (источник, пакетов, обновлён).
@@ -2135,7 +2120,7 @@ fn run_install(
     }
 
     let sizes = source_sizes(&set, &source);
-    let plan = render_plan(&set, config.general.jobs, &sizes);
+    let plan = render_plan(&set, config.general.jobs, &sizes, Lang::current());
     if !confirm_plan(&plan, assume_yes) {
         println!("{}", t("Отменено; изменения не внесены", "Cancelled; no changes made"));
         return;
@@ -2835,10 +2820,10 @@ fn main() {
             .or_else(|| info.payload().downcast_ref::<String>().cloned());
         let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
         let location_suffix = location.map(|l| {
-            if lang_ru() { format!(" в {l}") } else { format!(" at {l}") }
+            if Lang::current().is_ru() { format!(" в {l}") } else { format!(" at {l}") }
         }).unwrap_or_default();
         let payload = payload.unwrap_or_else(|| {
-            if lang_ru() { "<неизвестная паника>".to_string() } else { "<unknown panic>".to_string() }
+            if Lang::current().is_ru() { "<неизвестная паника>".to_string() } else { "<unknown panic>".to_string() }
         });
         eprintln!(
             "{}",
@@ -3055,10 +3040,26 @@ fn main() {
             RepoCommand::List => run_repo_list(),
             RepoCommand::Del { name } => match run_repo_del(&name) {
                 Ok(msg) => println!("{msg}"),
-                Err(e) => {
-                    let code = if e.contains("не найден") { 3 } else { 1 };
+                Err(RepoDelError::Config(e)) => {
+                    // NotFound → «не найдено» (код 3, DOCS §11), остальное — общая ошибка.
+                    use oparysh_core::config_edit::ConfigEditError;
+                    let code = match e {
+                        ConfigEditError::NotFound(_) => 3,
+                        ConfigEditError::Parse(_) => 1,
+                        ConfigEditError::Duplicate(_) | ConfigEditError::BadName(_) => 2,
+                    };
                     eprintln!("ERROR: {e}");
                     std::process::exit(code);
+                }
+                Err(RepoDelError::Io(path, e)) => {
+                    eprintln!(
+                        "ERROR: {}",
+                        t(
+                            &format!("не удалось записать {}: {e}", path.display()),
+                            &format!("failed to write {}: {e}", path.display())
+                        )
+                    );
+                    std::process::exit(1);
                 }
             },
         },

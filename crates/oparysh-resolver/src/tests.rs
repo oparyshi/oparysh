@@ -650,9 +650,27 @@ fn rendered_plan_lists_build_order_and_total() {
         ("a".to_string(), Some(2048)),
         ("b".to_string(), Some(1024)),
     ]);
-    let plan = crate::plan::render_plan(&set, 8, &sizes);
+    let plan = crate::plan::render_plan(&set, 8, &sizes, oparysh_core::i18n::Lang::En);
     assert!(plan.contains("The following 2 package(s) will be BUILT"));
     assert!(plan.find("#1  b").unwrap() < plan.find("#2  a").unwrap());
     assert!(plan.contains("dep of a"));
     assert!(plan.contains("Total DL: 3.0 KiB, build jobs: 8."));
+}
+
+/// 5.7: план локализуется: русский заголовок/итог при Lang::Ru.
+#[test]
+fn rendered_plan_localizes_to_ru() {
+    let mut src = FakeSource::default();
+    src.add("a", "1.0", &recipe("a", "1.0", "run = [\"b\"]"));
+    src.add("b", "1.0", &recipe("b", "1.0", ""));
+
+    let set = collect_requirements(&[req("a")], &src, &[]).unwrap();
+    let sizes = std::collections::BTreeMap::from([
+        ("a".to_string(), Some(2048)),
+        ("b".to_string(), Some(1024)),
+    ]);
+    let plan = crate::plan::render_plan(&set, 8, &sizes, oparysh_core::i18n::Lang::Ru);
+    assert!(plan.contains("Будет собрано пакетов: 2, уже установлено: 0"));
+    assert!(plan.contains("зависимость от a"));
+    assert!(plan.contains("К загрузке: 3.0 KiB, заданий сборки: 8."));
 }
