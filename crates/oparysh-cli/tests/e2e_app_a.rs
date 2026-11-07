@@ -129,6 +129,7 @@ fn config_file(tmp: &Path, repo: &Path) -> PathBuf {
 fn run(tmp: &Path, args: &[&str]) -> (ExitStatus, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_oparysh"))
         .args(args)
+        .env("LC_ALL", "ru_RU.UTF-8")
         .env("OPARYSH_CONFIG", tmp.join("oparysh.conf"))
         .env_remove("OPARYSH_DB_DIR")
         .env_remove("OPARYSH_CACHE_DIR")

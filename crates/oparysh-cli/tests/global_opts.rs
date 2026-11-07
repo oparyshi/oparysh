@@ -31,7 +31,8 @@ fn tmp_dir(tag: &str) -> PathBuf {
 
 fn base_cmd(_tmp: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_oparysh"));
-    cmd.env_remove("OPARYSH_CONFIG")
+    cmd.env("LC_ALL", "ru_RU.UTF-8")
+        .env_remove("OPARYSH_CONFIG")
         .env_remove("OPARYSH_DB_DIR")
         .env_remove("OPARYSH_CACHE_DIR")
         .env_remove("OPARYSH_ROOT")

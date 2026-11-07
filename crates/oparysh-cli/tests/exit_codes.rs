@@ -31,6 +31,7 @@ fn tmp_dir(tag: &str) -> PathBuf {
 fn run(tmp: &Path, args: &[&str]) -> (i32, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_oparysh"))
         .args(args)
+        .env("LC_ALL", "ru_RU.UTF-8")
         .env("OPARYSH_CONFIG", tmp.join("oparysh.conf"))
         .env_remove("OPARYSH_DB_DIR")
         .env_remove("OPARYSH_CACHE_DIR")
@@ -66,6 +67,7 @@ fn exit_2_on_invalid_oparysh_jobs() {
     let _ = config_file(&tmp);
     let output = Command::new(env!("CARGO_BIN_EXE_oparysh"))
         .args(["list"])
+        .env("LC_ALL", "ru_RU.UTF-8")
         .env("OPARYSH_CONFIG", tmp.join("oparysh.conf"))
         .env("OPARYSH_JOBS", "not-a-number")
         .output()
