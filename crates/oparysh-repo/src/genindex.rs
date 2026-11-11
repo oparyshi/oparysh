@@ -2,7 +2,9 @@
 //!
 //! Обходит `<root>/recipes/<name>/<ver>/pkg.toml`, сверяет наличие тарбола
 //! в `<root>/dist/<name>/<ver>/` (ровно один файл) и вычисляет
-//! `recipe_sha` / `src_sha256` (sha256). Результат — [`RepoIndex`],
+//! `recipe_sha` / `src_sha256` (sha256). Для url-источников (`[source].url`,
+//! без `[source].file`) тарбол в `dist/` не требуется: `src_sha256` берётся
+//! из `[source].sha256` рецепта. Результат — [`RepoIndex`],
 //! готовый к сериализации в `index.toml`.
 //!
 //! Записи `[[pkg]]` сортируются по (name, version); `deps` = `run` + `build`
@@ -171,8 +173,22 @@ fn build_entry(root: &Path, recipe_path: &Path) -> Result<RepoPkg, GenIndexError
     let version = recipe.pkg.version.clone();
 
     let recipe_sha = sha256_hex(recipe_path)?;
-    let dist = single_dist_file(root, &name, &version)?;
-    let src_sha256 = sha256_hex(&dist)?;
+
+    // dist-тарбол обязателен только для рецептов, чей источник — файл репо
+    // ([source].file). Для url-источников fetcher качает с апстрима и
+    // проверяет [source].sha256, поэтому src_sha256 берём из рецепта.
+    let src_sha256 = match single_dist_file(root, &name, &version) {
+        Ok(dist) => sha256_hex(&dist)?,
+        Err(e @ GenIndexError::DistMissing { .. }) if recipe.source.file.is_none() => {
+            let sha = recipe.source.sha256.as_deref().unwrap_or("");
+            let valid = sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+            if !valid {
+                return Err(e);
+            }
+            sha.to_string()
+        }
+        Err(e) => return Err(e),
+    };
 
     // deps: run, затем build; дубли убираем, порядок сохраняем.
     let mut seen = BTreeSet::new();
@@ -306,6 +322,45 @@ mod tests {
         let root = temp_repo("missing_dist");
         write_pkg(&root, "alpha", "1.0.0", "");
         fs::remove_dir_all(root.join(DIST_DIR).join("alpha")).unwrap();
+
+        let opts = GenIndexOptions::new("stable");
+        let err = generate_index(&root, &opts).unwrap_err();
+        assert!(matches!(err, GenIndexError::DistMissing { .. }));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn url_recipe_without_dist_uses_source_sha() {
+        let root = temp_repo("url_no_dist");
+        let dir = root.join(RECIPES_DIR).join("upstream").join("1.0.0");
+        fs::create_dir_all(&dir).unwrap();
+        let sha = "1".repeat(64);
+        fs::write(
+            dir.join(RECIPE_FILE),
+            format!(
+                "[pkg]\nname = \"upstream\"\nversion = \"1.0.0\"\nbuild = 1\narch = [\"x86_64\"]\ndesc = \"url pkg\"\n\n[source]\nurl = \"https://example.com/upstream-1.0.0.tar.gz\"\nsha256 = \"{sha}\"\n\n[build]\nsystem = \"make-only\"\n"
+            ),
+        )
+        .unwrap();
+
+        let opts = GenIndexOptions::new("stable");
+        let index = generate_index(&root, &opts).unwrap();
+        assert_eq!(index.pkg[0].src_sha256, sha);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn url_recipe_without_dist_and_without_sha_is_error() {
+        let root = temp_repo("url_no_dist_no_sha");
+        let dir = root.join(RECIPES_DIR).join("upstream").join("1.0.0");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(RECIPE_FILE),
+            "[pkg]\nname = \"upstream\"\nversion = \"1.0.0\"\nbuild = 1\narch = [\"x86_64\"]\ndesc = \"url pkg\"\n\n[source]\nurl = \"https://example.com/upstream-1.0.0.tar.gz\"\n\n[build]\nsystem = \"make-only\"\n",
+        )
+        .unwrap();
 
         let opts = GenIndexOptions::new("stable");
         let err = generate_index(&root, &opts).unwrap_err();
